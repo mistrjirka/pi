@@ -12,7 +12,7 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 		}
 	});
 
-	it("rejects an RPC prompt while manual compaction is in progress", async () => {
+	it("queues an RPC prompt during manual compaction and delivers it once afterwards", async () => {
 		let markCompactionStarted = () => {};
 		const compactionStarted = new Promise<void>((resolve) => {
 			markCompactionStarted = resolve;
@@ -59,7 +59,11 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 		await compactionStarted;
 
 		let preflightResult: PromptDisposition | undefined;
-		let promptError: unknown;
+		const settled = new Promise<void>((resolve) => {
+			harness.session.subscribe((event) => {
+				if (event.type === "agent_settled") resolve();
+			});
+		});
 		try {
 			await harness.session.prompt("PROBE-7150", {
 				source: "rpc",
@@ -67,12 +71,14 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 					preflightResult = result;
 				},
 			});
-		} catch (error) {
-			promptError = error;
+			expect(preflightResult).toBe("queued");
+			expect(getUserTexts(harness)).not.toContain("PROBE-7150");
+			expect(harness.session.pendingMessageCount).toBe(1);
 		} finally {
 			releaseCompaction();
 			await compactPromise;
 		}
+		await settled;
 
 		const persistedUserTexts = harness.sessionManager
 			.getEntries()
@@ -80,13 +86,10 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 				entry.type === "message" && entry.message.role === "user" ? [getMessageText(entry.message)] : [],
 			);
 
-		expect(preflightResult).toBeUndefined();
-		expect(promptError).toEqual(
-			expect.objectContaining({ message: expect.stringContaining("compaction is in progress") }),
-		);
-		expect(getUserTexts(harness)).not.toContain("PROBE-7150");
-		expect(persistedUserTexts).not.toContain("PROBE-7150");
-		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
-		expect(harness.eventsOfType("agent_settled")).toHaveLength(0);
+		expect(preflightResult).toBe("queued");
+		expect(getUserTexts(harness).filter((text) => text === "PROBE-7150")).toHaveLength(1);
+		expect(persistedUserTexts.filter((text) => text === "PROBE-7150")).toHaveLength(1);
+		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 });

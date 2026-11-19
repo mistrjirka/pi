@@ -149,9 +149,11 @@ export interface AgentOptions {
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
 	public mode: QueueMode;
+	private readonly onRemoved: (messages: readonly AgentMessage[]) => void;
 
-	constructor(mode: QueueMode) {
+	constructor(mode: QueueMode, onRemoved: (messages: readonly AgentMessage[]) => void) {
 		this.mode = mode;
+		this.onRemoved = onRemoved;
 	}
 
 	enqueue(message: AgentMessage): void {
@@ -171,11 +173,35 @@ class PendingMessageQueue {
 	drain(): AgentMessage[] {
 		const drained = this.peek();
 		this.messages = this.messages.slice(drained.length);
+		if (drained.length > 0) this.onRemoved(drained);
 		return drained;
 	}
 
+	contains(message: AgentMessage): boolean {
+		return this.messages.includes(message);
+	}
+
+	replace(messages: readonly AgentMessage[], replacement?: AgentMessage): boolean {
+		const index = this.messages.indexOf(messages[0]);
+		if (
+			messages.length === 0 ||
+			index < 0 ||
+			messages.some((message, offset) => this.messages[index + offset] !== message)
+		) {
+			return false;
+		}
+		this.messages.splice(index, messages.length, ...(replacement ? [replacement] : []));
+		return true;
+	}
+
+	prepend(message: AgentMessage): void {
+		this.messages.unshift(message);
+	}
+
 	clear(): void {
+		const removed = this.messages;
 		this.messages = [];
+		if (removed.length > 0) this.onRemoved(removed);
 	}
 }
 
@@ -196,6 +222,7 @@ export class Agent {
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
+	private readonly queueRemovalListeners = new Set<(messages: readonly AgentMessage[]) => void>();
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -252,8 +279,11 @@ export class Agent {
 		this.prepareRequest = runtimeOptions.prepareRequest;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
-		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
-		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time");
+		const onQueueRemoved = (messages: readonly AgentMessage[]) => {
+			for (const listener of this.queueRemovalListeners) listener(messages);
+		};
+		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time", onQueueRemoved);
+		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time", onQueueRemoved);
 		this.sessionId = runtimeOptions.sessionId;
 		this.thinkingBudgets = runtimeOptions.thinkingBudgets;
 		this.transport = runtimeOptions.transport ?? "auto";
@@ -312,6 +342,27 @@ export class Agent {
 	/** Queue a message to run only after the agent would otherwise stop. */
 	followUp(message: AgentMessage): void {
 		this.followUpQueue.enqueue(message);
+	}
+
+	/** Observe consumption or clearing synchronously, before asynchronous message events. */
+	subscribeQueueRemoval(listener: (messages: readonly AgentMessage[]) => void): () => void {
+		this.queueRemovalListeners.add(listener);
+		return () => this.queueRemovalListeners.delete(listener);
+	}
+
+	/** Whether this exact message is still available for queue mutation. */
+	isMessageQueued(message: AgentMessage): boolean {
+		return this.steeringQueue.contains(message) || this.followUpQueue.contains(message);
+	}
+
+	/** Atomically replace consecutive pending messages from one queue, or leave both queues unchanged. */
+	replaceQueuedMessages(messages: readonly AgentMessage[], replacement?: AgentMessage): boolean {
+		return this.steeringQueue.replace(messages, replacement) || this.followUpQueue.replace(messages, replacement);
+	}
+
+	/** Restore an input whose preparation failed before its run started. */
+	prependQueuedMessage(message: AgentMessage, mode: "steer" | "followUp"): void {
+		(mode === "steer" ? this.steeringQueue : this.followUpQueue).prepend(message);
 	}
 
 	/** Remove all queued steering messages. */

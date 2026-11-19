@@ -10,6 +10,7 @@ import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { PromptDisposition, QueuedInputDisposition, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { QueueState } from "../../core/queued-input.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
@@ -19,11 +20,29 @@ import type { SourceInfo } from "../../core/source-info.ts";
 
 export type RpcCommand =
 	// Prompting
-	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
-	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
+	| {
+			id?: string;
+			type: "prompt";
+			message: string;
+			images?: ImageContent[];
+			streamingBehavior?: "steer" | "followUp";
+			messageId?: string;
+	  }
+	| { id?: string; type: "steer"; message: string; images?: ImageContent[]; messageId?: string }
+	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[]; messageId?: string }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "clear_queue" }
+	| { id?: string; type: "get_queue" }
+	| {
+			id?: string;
+			type: "update_queued_message";
+			messageId: string;
+			message: string;
+			images?: ImageContent[];
+			expectedRevision?: number;
+	  }
+	| { id?: string; type: "remove_queued_message"; messageId: string; expectedRevision?: number }
+	| { id?: string; type: "combine_queued_messages"; messageIds: string[]; expectedRevision?: number }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State
@@ -106,6 +125,7 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	queue: QueueState;
 }
 
 // ============================================================================
@@ -115,14 +135,26 @@ export interface RpcSessionState {
 // Success responses with data
 export type RpcResponse =
 	// Prompting
-	| { id?: string; type: "response"; command: "prompt"; success: true; data: { disposition: PromptDisposition } }
-	| { id?: string; type: "response"; command: "steer"; success: true; data: { disposition: QueuedInputDisposition } }
+	| {
+			id?: string;
+			type: "response";
+			command: "prompt";
+			success: true;
+			data: { disposition: PromptDisposition; messageId: string };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "steer";
+			success: true;
+			data: { disposition: QueuedInputDisposition; messageId: string };
+	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "follow_up";
 			success: true;
-			data: { disposition: QueuedInputDisposition };
+			data: { disposition: QueuedInputDisposition; messageId: string };
 	  }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| {
@@ -133,6 +165,13 @@ export type RpcResponse =
 			data: { steering: string[]; followUp: string[] };
 	  }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_queue" | "update_queued_message" | "remove_queued_message" | "combine_queued_messages";
+			success: true;
+			data: QueueState;
+	  }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }

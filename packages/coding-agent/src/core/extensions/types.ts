@@ -1201,6 +1201,18 @@ export interface InputEvent {
 	streamingBehavior?: "steer" | "followUp";
 }
 
+/** Fired after prepared user input has entered a pending queue. Cannot veto or transform it. */
+export interface InputQueuedEvent {
+	type: "input_queued";
+	/** Stable identity of the accepted pending input. */
+	messageId: string;
+	/** Prepared text after input handlers and prompt expansion. */
+	message: string;
+	images?: ImageContent[];
+	mode: "steer" | "followUp";
+	source: InputSource;
+}
+
 /** Result from input event handler */
 export type InputEventResult =
 	| { action: "continue" }
@@ -1454,6 +1466,7 @@ export type ExtensionEvent =
 	| ThinkingLevelSelectEvent
 	| UserBashEvent
 	| InputEvent
+	| InputQueuedEvent
 	| ToolCallEvent
 	| ToolResultEvent;
 
@@ -1708,6 +1721,7 @@ export interface ExtensionAPI {
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): () => void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): () => void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): () => void;
+	on(event: "input_queued", handler: ExtensionHandler<InputQueuedEvent>): () => void;
 
 	// =========================================================================
 	// Tool Registration

@@ -235,7 +235,7 @@ describe("RPC prompt response semantics", () => {
 					type: "response",
 					command: "prompt",
 					success: true,
-					data: { disposition: "started" },
+					data: { disposition: "started", messageId: expect.any(String) },
 				});
 			});
 		} finally {
@@ -265,7 +265,13 @@ describe("RPC prompt response semantics", () => {
 				lineHandler(JSON.stringify({ id, type: "prompt", message }));
 				await vi.waitFor(() => {
 					expect(getPromptResponses(rpcIo.outputLines, id)).toEqual([
-						{ id, type: "response", command: "prompt", success: true, data: { disposition: "handled" } },
+						{
+							id,
+							type: "response",
+							command: "prompt",
+							success: true,
+							data: { disposition: "handled", messageId: expect.any(String) },
+						},
 					]);
 				});
 			}
@@ -302,7 +308,7 @@ describe("RPC prompt response semantics", () => {
 					type: "response",
 					command: "prompt",
 					success: true,
-					data: { disposition: "queued" },
+					data: { disposition: "queued", messageId: expect.any(String) },
 				});
 			});
 
@@ -342,10 +348,12 @@ describe("RPC prompt response semantics", () => {
 						type: "response",
 						command: type,
 						success: true,
-						data: { disposition: "handled" },
+						data: { disposition: "handled", messageId: expect.any(String) },
 					});
 					expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
 						type: "queue_update",
+						revision: expect.any(Number),
+						messages: expect.any(Array),
 						steering: type === "steer" ? ["B"] : [],
 						followUp: type === "follow_up" ? ["B"] : [],
 					});
@@ -382,10 +390,12 @@ describe("RPC prompt response semantics", () => {
 					type: "response",
 					command: type,
 					success: true,
-					data: { disposition: "queued" },
+					data: { disposition: "queued", messageId: expect.any(String) },
 				});
 				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
 					type: "queue_update",
+					revision: expect.any(Number),
+					messages: expect.any(Array),
 					steering: type === "steer" ? ["B"] : [],
 					followUp: type === "follow_up" ? ["B"] : [],
 				});
@@ -414,7 +424,7 @@ describe("RPC prompt response semantics", () => {
 			);
 			await vi.waitFor(() => {
 				expect(getPromptResponses(rpcIo.outputLines, "clear-steering")).toMatchObject([
-					{ data: { disposition: "queued" } },
+					{ data: { disposition: "queued", messageId: expect.any(String) } },
 				]);
 			});
 

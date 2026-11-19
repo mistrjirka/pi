@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import { afterEach, describe, expect, it } from "vitest";
 import { deferredStateForDetails } from "../../src/core/session-lazy-state.ts";
+import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
 
 const tempFolders: string[] = [];
 afterEach(() => {
@@ -42,9 +42,9 @@ function fixture(headerVersion = 3, malformedPrefix = false) {
 			timestamp: 1,
 		},
 	};
-	const prefix = Buffer.from(JSON.stringify(header) + "\n");
+	const prefix = Buffer.from(`${JSON.stringify(header)}\n`);
 	const malformed = malformedPrefix ? Buffer.from([0xff, 0x0a]) : Buffer.alloc(0);
-	const payload = Buffer.from(JSON.stringify(toolResult) + "\n");
+	const payload = Buffer.from(`${JSON.stringify(toolResult)}\n`);
 	writeFileSync(file, Buffer.concat([prefix, malformed, payload]));
 	return { folder, file, state };
 }

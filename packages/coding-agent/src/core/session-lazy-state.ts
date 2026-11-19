@@ -122,7 +122,7 @@ export function parseDeferredSessionEntry<T>(line: string, filePath: string, byt
 	}
 	let parsed: T;
 	try {
-		parsed = JSON.parse(line.slice(0, range.start) + '""' + line.slice(range.end)) as T;
+		parsed = JSON.parse(`${line.slice(0, range.start)}""${line.slice(range.end)}`) as T;
 	} catch {
 		try {
 			return JSON.parse(line) as T;

@@ -41,7 +41,8 @@ function packageDependencies(entry) {
 }
 
 function sortedObject(object) {
-	return Object.fromEntries(Object.entries(object).sort(([a], [b]) => a.localeCompare(b)));
+	// Lockfile bytes must not depend on the host locale (for example Czech "ch" ordering).
+	return Object.fromEntries(Object.entries(object).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 function sortedPackageEntry(entry) {
@@ -72,7 +73,7 @@ function sortedPackageEntry(entry) {
 			sorted[field] = entry[field];
 		}
 	}
-	for (const [field, value] of Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) {
+	for (const [field, value] of Object.entries(entry).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
 		if (sorted[field] === undefined) {
 			sorted[field] = value;
 		}

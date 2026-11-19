@@ -410,6 +410,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "prompt": {
+				const messageId = command.messageId ?? crypto.randomUUID();
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
@@ -418,11 +419,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				void session
 					.prompt(command.message, {
 						images: command.images,
+						messageId,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",
 						preflightResult: (disposition) => {
 							preflightSucceeded = true;
-							output(success(id, "prompt", { disposition }));
+							output(success(id, "prompt", { disposition, messageId }));
 						},
 					})
 					.catch((e) => {
@@ -438,13 +440,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "steer": {
-				const disposition = await session.steer(command.message, command.images, { source: "rpc" });
-				return success(id, "steer", { disposition });
+				const messageId = command.messageId ?? crypto.randomUUID();
+				const disposition = await session.steer(command.message, command.images, { source: "rpc", messageId });
+				return success(id, "steer", { disposition, messageId });
 			}
 
 			case "follow_up": {
-				const disposition = await session.followUp(command.message, command.images, { source: "rpc" });
-				return success(id, "follow_up", { disposition });
+				const messageId = command.messageId ?? crypto.randomUUID();
+				const disposition = await session.followUp(command.message, command.images, { source: "rpc", messageId });
+				return success(id, "follow_up", { disposition, messageId });
 			}
 
 			case "abort": {
@@ -455,6 +459,35 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "clear_queue": {
 				return success(id, "clear_queue", session.clearQueue());
 			}
+
+			case "get_queue":
+				return success(id, "get_queue", session.getQueueState());
+
+			case "update_queued_message":
+				return success(
+					id,
+					"update_queued_message",
+					session.updateQueuedMessage(
+						command.messageId,
+						command.message,
+						command.images,
+						command.expectedRevision,
+					),
+				);
+
+			case "remove_queued_message":
+				return success(
+					id,
+					"remove_queued_message",
+					session.removeQueuedMessage(command.messageId, command.expectedRevision),
+				);
+
+			case "combine_queued_messages":
+				return success(
+					id,
+					"combine_queued_messages",
+					session.combineQueuedMessages(command.messageIds, command.expectedRevision),
+				);
 
 			case "new_session": {
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
@@ -480,6 +513,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					queue: session.getQueueState(),
 				};
 				return success(id, "get_state", state);
 			}
@@ -789,6 +823,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		const command = parsed as RpcCommand;
+		const queueError = validateQueueInput(parsed);
+		if (queueError) {
+			output(error(command.id, command.type, queueError));
+			return;
+		}
 		activeCommands++;
 		try {
 			let response: RpcResponse | undefined;
@@ -834,4 +873,58 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	// Keep process alive forever
 	return new Promise(() => {});
+}
+
+/** Validate queue mutation fields at the untyped JSONL input boundary. */
+function validateQueueInput(value: unknown): string | undefined {
+	if (typeof value !== "object" || value === null || !("type" in value)) return undefined;
+	const command = value as Record<string, unknown>;
+	const type = command.type;
+	const mutation =
+		type === "update_queued_message" || type === "remove_queued_message" || type === "combine_queued_messages";
+	const submission = type === "prompt" || type === "steer" || type === "follow_up";
+	if (!mutation && !submission) return undefined;
+	if (
+		type === "prompt" &&
+		command.streamingBehavior !== undefined &&
+		command.streamingBehavior !== "steer" &&
+		command.streamingBehavior !== "followUp"
+	) {
+		return "streamingBehavior must be 'steer' or 'followUp'.";
+	}
+	if (type === "combine_queued_messages") {
+		if (!Array.isArray(command.messageIds) || command.messageIds.some((id) => typeof id !== "string" || !id)) {
+			return "messageIds must be an array of non-empty strings.";
+		}
+	} else if (
+		(mutation || command.messageId !== undefined) &&
+		(typeof command.messageId !== "string" || !command.messageId)
+	) {
+		return "messageId must be a non-empty string.";
+	}
+	if ((type === "update_queued_message" || submission) && typeof command.message !== "string") {
+		return "message must be a string.";
+	}
+	if (
+		mutation &&
+		command.expectedRevision !== undefined &&
+		(!Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0)
+	) {
+		return "expectedRevision must be a non-negative integer.";
+	}
+	if (
+		command.images !== undefined &&
+		(!Array.isArray(command.images) ||
+			command.images.some(
+				(image) =>
+					typeof image !== "object" ||
+					image === null ||
+					image.type !== "image" ||
+					typeof image.data !== "string" ||
+					typeof image.mimeType !== "string",
+			))
+	) {
+		return "images must contain ImageContent objects.";
+	}
+	return undefined;
 }

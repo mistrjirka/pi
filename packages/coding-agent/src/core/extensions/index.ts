@@ -108,6 +108,7 @@ export type {
 	// Events - Input
 	InputEvent,
 	InputEventResult,
+	InputQueuedEvent,
 	InputSource,
 	KeybindingHints,
 	KeybindingsManager,
