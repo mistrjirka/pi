@@ -3,6 +3,7 @@ import {
 	type AssistantMessage,
 	getCurrentSystemMessage,
 	type ImageContent,
+	type JsonObject,
 	type Message,
 	type SystemMessage,
 	type TextContent,
@@ -21,14 +22,23 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
+	unlinkSync,
 	type Stats,
 	statSync,
 	writeFileSync,
+	writeSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
+import {
+	deferAppendedSessionState,
+	deferredStateForDetails,
+	largeDetailsStateRange,
+	parseDeferredSessionEntry,
+} from "./session-lazy-state.ts";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, pathsEqual, resolvePath } from "../utils/paths.ts";
 import {
@@ -630,43 +640,53 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const entries: FileEntry[] = [];
-	let pending = "";
+	// Buffer slices from an open read are reused. Copy only incomplete row fragments
+	// and join them once when a newline arrives, avoiding O(n²) concatenation
+	// for tool results that contain multi-megabyte replay snapshots.
+	let fragments: Buffer[] = [];
+	let partialLength = 0;
+	let byteOffset = 0;
 	const fd = openSync(resolvedFilePath, "r");
 	try {
-		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
-
-			pending += decoder.write(buffer.subarray(0, bytesRead));
-			let lineStart = 0;
-			let newlineIndex = pending.indexOf("\n", lineStart);
-			while (newlineIndex !== -1) {
-				const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
+			let start = 0;
+			while (start < bytesRead) {
+				const newline = buffer.indexOf(10, start);
+				if (newline < 0 || newline >= bytesRead) break;
+				const tail = buffer.subarray(start, newline);
+				const fullLine = fragments.length ? Buffer.concat([...fragments, tail], partialLength + tail.length) : tail;
+				const entry = parseDeferredSessionEntry<FileEntry>(fullLine.toString("utf8"), resolvedFilePath, byteOffset);
 				if (entry) entries.push(entry);
-				lineStart = newlineIndex + 1;
-				newlineIndex = pending.indexOf("\n", lineStart);
+				byteOffset += fullLine.length + 1;
+				start = newline + 1;
+				fragments = [];
+				partialLength = 0;
 			}
-			pending = pending.slice(lineStart);
+			if (start < bytesRead) {
+				const fragment = Buffer.from(buffer.subarray(start, bytesRead));
+				fragments.push(fragment);
+				partialLength += fragment.length;
+			}
 		}
-
-		pending += decoder.end();
-		const finalEntry = parseSessionEntryLine(pending);
-		if (finalEntry) entries.push(finalEntry);
+		if (partialLength > 0) {
+			const line = Buffer.concat(fragments, partialLength);
+			const entry = parseDeferredSessionEntry<FileEntry>(line.toString("utf8"), resolvedFilePath, byteOffset);
+			if (entry) entries.push(entry);
+		}
 	} finally {
 		closeSync(fd);
 	}
 
-	// Validate session header before repairing the file.
 	if (entries.length === 0) return entries;
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		return [];
 	}
 
-	if (pending) appendFileSync(resolvedFilePath, "\n");
+	if (partialLength > 0) appendFileSync(resolvedFilePath, "\n");
 	return entries;
 }
 
@@ -1131,13 +1151,90 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
+		// Keep the old file readable until the replacement is complete. Stream
+		// large deferred state strings directly from the original JSONL file,
+		// without materializing all interpreter snapshots during migration.
+		const target = this.sessionFile;
+		const temporary = target + "." + process.pid + "." + randomUUID() + ".tmp";
+		const statePositions: Array<{
+			reference: NonNullable<ReturnType<typeof deferredStateForDetails>>;
+			offset: number;
+			length: number;
+		}> = [];
+		let succeeded = false;
 		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			const mode = existsSync(target) ? statSync(target).mode & 0o777 : 0o600;
+			const fd = openSync(temporary, "wx", mode);
+			try {
+				let byteOffset = 0;
+				const buffer = Buffer.allocUnsafe(1024 * 1024);
+				for (const entry of this.fileEntries) {
+					let reference: NonNullable<ReturnType<typeof deferredStateForDetails>> | undefined;
+					let serializable: FileEntry = entry;
+					if (entry.type === "message" && entry.message.role === "toolResult") {
+						const details = entry.message.details;
+						if (details && typeof details === "object") {
+							const deferred = deferredStateForDetails(details);
+							if (deferred && deferred.override === undefined) {
+								reference = deferred;
+								const shallowDetails: JsonObject = {};
+								for (const [key, value] of Object.entries(details)) {
+									shallowDetails[key] = key === "state" ? "" : value;
+								}
+								serializable = {
+									...entry,
+									message: { ...entry.message, details: shallowDetails },
+								};
+							}
+						}
+					}
+					const serialized = JSON.stringify(serializable);
+					if (!reference) {
+						writeFileSync(fd, serialized + "\n");
+						byteOffset += Buffer.byteLength(serialized) + 1;
+						continue;
+					}
+					const range = largeDetailsStateRange(serialized, 0);
+					if (!range) throw new Error("Unable to locate deferred state in rewritten session.");
+					const prefix = serialized.slice(0, range.start);
+					const suffix = serialized.slice(range.end);
+					writeSync(fd, prefix);
+					const offset = byteOffset + Buffer.byteLength(prefix);
+					const srcFd = openSync(reference.path, "r");
+					try {
+						let copied = 0;
+						while (copied < reference.length) {
+							const length = Math.min(buffer.length, reference.length - copied);
+							const read = readSync(srcFd, buffer, 0, length, reference.offset + copied);
+							if (!read) throw new Error("Deferred state was truncated while rewriting session.");
+							writeSync(fd, buffer, 0, read);
+							copied += read;
+						}
+					} finally {
+						closeSync(srcFd);
+					}
+					writeSync(fd, suffix + "\n");
+					statePositions.push({ reference, offset, length: reference.length });
+					byteOffset = offset + reference.length + Buffer.byteLength(suffix) + 1;
+				}
+			} finally {
+				closeSync(fd);
 			}
+			renameSync(temporary, target);
+			for (const { reference, offset, length } of statePositions) {
+				reference.path = target;
+				reference.offset = offset;
+				reference.length = length;
+			}
+			succeeded = true;
 		} finally {
-			closeSync(fd);
+			if (!succeeded) {
+				try {
+					unlinkSync(temporary);
+				} catch {
+					/* Original file remains intact. */
+				}
+			}
 		}
 	}
 
@@ -1201,6 +1298,10 @@ export class SessionManager {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		// Record the physical append point for lazy retention of new code-tool
+		// snapshots. The first flush is handled by the normal loader on resume.
+		const appendOffset =
+			this.persist && this.flushed && this.sessionFile ? statSync(this.sessionFile).size : undefined;
 		try {
 			this._persist(entry);
 		} catch (error) {
@@ -1210,6 +1311,9 @@ export class SessionManager {
 			this.byId.delete(entry.id);
 			this.leafId = previousLeafId;
 			throw error;
+		}
+		if (appendOffset !== undefined && this.sessionFile) {
+			deferAppendedSessionState(entry, this.sessionFile, appendOffset);
 		}
 	}
 
