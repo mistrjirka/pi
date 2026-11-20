@@ -80,6 +80,7 @@ import type {
 	SessionManager,
 } from "../session-manager.ts";
 import type { Settings } from "../settings-manager.ts";
+import type { SideQuestionSnapshot } from "../side-questions.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -383,6 +384,8 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/** Isolated completed context for a side question. Available in SDK-created session hosts. */
+	getSideQuestionSnapshot?(options?: { signal?: AbortSignal }): Promise<SideQuestionSnapshot>;
 }
 
 /** Options for {@link ExtensionToolContext.executeTool}. */

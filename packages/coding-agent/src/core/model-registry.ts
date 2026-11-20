@@ -139,6 +139,15 @@ export class ModelRegistry {
 		return this.runtime.streamSimple(model, context, options);
 	}
 
+	/** Answer without tools or main-session mutation, using an explicitly supported provider. */
+	streamSideQuestion(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions,
+	): AssistantMessageEventStream {
+		return this.runtime.streamSideQuestion(model, context, options);
+	}
+
 	complete<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,

@@ -654,7 +654,24 @@ export function composeModelProvider(
 			: undefined,
 		stream: (model, context, options) => streamWith(model, context, options, false),
 		streamSimple: (model, context, options) => streamWith(model, context, options, true),
+		sideQuestionUsesLiveContext:
+			base?.streamSideQuestion && !extension?.streamSimple ? base.sideQuestionUsesLiveContext : undefined,
 	};
+
+	const sideQuestion = base?.streamSideQuestion;
+	if (sideQuestion && !extension?.streamSimple) {
+		provider.streamSideQuestion = (model, context, options) =>
+			lazyStream(
+				model,
+				async () => {
+					if (!supportsBaseApi(model))
+						throw new Error(`Provider ${providerId} has no safe side-question implementation for "${model.api}"`);
+					return sideQuestion.call(base, model, context, options);
+				},
+				undefined,
+				options?.signal,
+			);
+	}
 
 	const fetchDeferred = base?.fetchDeferred;
 	if (fetchDeferred) {

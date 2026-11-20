@@ -135,7 +135,7 @@ export function getAllBuiltinModels<TProvider extends BuiltinProvider>(provider:
 
 /** All built-in providers, freshly constructed. */
 export function builtinProviders(): Provider[] {
-	return [
+	const providers: Provider[] = [
 		amazonBedrockProvider(),
 		antLingProvider(),
 		anthropicProvider(),
@@ -180,6 +180,19 @@ export function builtinProviders(): Provider[] {
 		zaiProvider(),
 		zaiCodingCnProvider(),
 	];
+	// These adapters perform one API request and never execute host tools. Native/extension
+	// providers are not included and must declare their own safe side-question capability.
+	return providers.map((provider) => ({
+		...provider,
+		streamSideQuestion: (model, context, options) =>
+			provider.streamSimple(model, context, {
+				...options,
+				// Codex WebSocket state is shared by session id. SSE keeps that cache identity
+				// without reading or replacing the main socket's continuation cursor.
+				...(model.api === "openai-codex-responses" ? { transport: "sse" as const } : {}),
+				disableContinuation: true,
+			}),
+	}));
 }
 
 /** A `Models` collection with every built-in provider registered. */

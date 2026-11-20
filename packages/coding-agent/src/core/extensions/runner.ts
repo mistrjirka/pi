@@ -18,6 +18,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
+import { getSideQuestionSnapshot } from "../side-questions.ts";
 import {
 	type BuildSystemPromptOptions,
 	buildSystemPrompt,
@@ -968,6 +969,10 @@ export class ExtensionRunner {
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
+			},
+			getSideQuestionSnapshot: (options) => {
+				runner.assertActive();
+				return getSideQuestionSnapshot(runner.sessionManager, options);
 			},
 		};
 	}

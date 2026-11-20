@@ -780,6 +780,34 @@ export class ModelRuntime implements Models {
 		);
 	}
 
+	/** Dispatch only to a provider's explicit tool-free, transcript-preserving capability. */
+	streamSideQuestion(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions,
+	): AssistantMessageEventStream {
+		const transcript = normalizeContext(context);
+		return lazyStream(
+			model,
+			async () => {
+				assertChatModel(model);
+				if (isVirtualModel(model)) {
+					throw new ModelsError("provider", "Side questions require an already selected physical model.");
+				}
+				if (!this.models.getProvider(model.provider)?.streamSideQuestion) {
+					throw new ModelsError("provider", `Provider ${model.provider} does not support safe side questions`);
+				}
+				const prepared = await this.prepareRequest(model, { ...options, disableContinuation: true });
+				const stream = prepared.provider.streamSideQuestion;
+				if (!stream)
+					throw new ModelsError("provider", `Provider ${model.provider} no longer supports safe side questions`);
+				return stream.call(prepared.provider, prepared.model, transcript, prepared.options);
+			},
+			undefined,
+			options?.signal,
+		);
+	}
+
 	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage> {
 		return this.streamSimple(model, context, options).result();
 	}

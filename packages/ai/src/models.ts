@@ -232,6 +232,18 @@ export interface Provider<TApi extends Api = Api> {
 		context: TranscriptContext,
 		options?: SimpleStreamOptions,
 	): AssistantMessageEventStream;
+	/**
+	 * Answer an ephemeral side question without executing tools or mutating the main conversation.
+	 * The last user message is the question. Cancellation belongs only to this request.
+	 * Providers must opt in explicitly. Ordinary streamSimple implementations may run agent loops.
+	 */
+	streamSideQuestion?(
+		model: Model<TApi>,
+		context: TranscriptContext,
+		options?: SimpleStreamOptions,
+	): AssistantMessageEventStream;
+	/** Use an existing provider query instead of replaying context. Requires streamSideQuestion. */
+	readonly sideQuestionUsesLiveContext?: boolean;
 	fetchDeferred?(
 		model: Model<TApi>,
 		handle: DeferredHandle,

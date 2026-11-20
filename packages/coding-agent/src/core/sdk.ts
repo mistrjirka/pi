@@ -24,6 +24,7 @@ import {
 	isToolModifier,
 	SettingsManager,
 } from "./settings-manager.ts";
+import { SideQuestionSnapshots } from "./side-questions.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -129,6 +130,7 @@ export type {
 	ToolDefinition,
 } from "./extensions/index.ts";
 export type { PromptTemplate } from "./prompt-templates.ts";
+export type { SideQuestionSnapshot } from "./side-questions.ts";
 export type { Skill } from "./skills.ts";
 export type { Tool } from "./tools/index.ts";
 
@@ -331,6 +333,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	let sideQuestions: SideQuestionSnapshots | undefined;
 	const cacheWarmer = new CacheWarmer(
 		modelRuntime,
 		sessionManager,
@@ -417,6 +420,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// shallow-copy the messages array or refresh the model object without changing
 			// the provider request, so top-level object identity is not a valid cache key.
 			if (options?.sessionId === sessionManager.getSessionId()) {
+				sideQuestions?.capture(model, context, requestOptions);
 				cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
 			}
 			return modelRuntime.streamSimple(model, context, requestOptions);
@@ -469,6 +473,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+	});
+
+	sideQuestions = new SideQuestionSnapshots({
+		agent,
+		sessionManager,
+		modelRuntime,
+		getExtensionRunner: () => extensionRunnerRef.current,
+		getSystemPrompt: () => session.systemPrompt,
+		buildOptions: buildRequestOptions,
 	});
 
 	const extensionsResult = resourceLoader.getExtensions();
