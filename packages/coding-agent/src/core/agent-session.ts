@@ -2231,7 +2231,7 @@ export class AgentSession {
 		submittedDuringCompaction?: AbortController,
 	): boolean {
 		const manualCompaction = this._compactionAbortController !== undefined;
-		const hasPending = this.pendingMessageCount > 0;
+		const hasPending = this.agent.hasQueuedMessages();
 		if (!this.isStreaming && !manualCompaction && !submittedDuringCompaction && !hasPending) return false;
 		const behavior =
 			options?.streamingBehavior ??
@@ -2287,16 +2287,26 @@ export class AgentSession {
 	private async _resumeQueuedPrompt(): Promise<void> {
 		const admitted = await this._admitInput(async () => {
 			if (!this.isIdle) return {};
-			const input = this._queuedInputs.takeNext();
-			if (!input) return {};
+			const next = this.agent.peekNextQueuedMessage();
+			if (!next) return {};
+			let trigger: BeforeAgentStartTrigger;
+			let restore: () => void;
+			if (next.message.role === "custom") {
+				const { message, mode } = next;
+				this.agent.replaceQueuedMessages([message]);
+				trigger = { messageType: "custom", message };
+				restore = () => this.agent.prependQueuedMessage(message, mode);
+			} else {
+				const input = this._queuedInputs.takeNext();
+				if (!input) return {};
+				trigger = { messageType: "user", prompt: input.info.message, images: input.info.images };
+				restore = () => this._queuedInputs.restore(input);
+			}
 			let started = false;
-			const run = this._startRun(
-				{ messageType: "user", prompt: input.info.message, images: input.info.images },
-				() => {
-					started = true;
-				},
-			).catch((error: unknown) => {
-				if (!started) this._queuedInputs.restore(input);
+			const run = this._startRun(trigger, () => {
+				started = true;
+			}).catch((error: unknown) => {
+				if (!started) restore();
 				throw error;
 			});
 			return { run };
@@ -2522,6 +2532,7 @@ export class AgentSession {
 	 * - Streaming + triggerTurn false: appended to state/session once the current turn ends
 	 * - Not streaming + triggerTurn: appends to state/session, starts new turn
 	 * - Not streaming + no trigger: appends to state/session, no turn
+	 * Explicit turn triggers wait in the existing delivery queues during compaction.
 	 *
 	 * @param message Custom message with customType, content, display, details
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
@@ -2542,17 +2553,22 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.isStreaming && options?.triggerTurn !== false) {
+		} else if (options?.triggerTurn && this._isEmittingAgentSettled) {
+			this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options));
+		} else if (
+			(this.isStreaming && options?.triggerTurn !== false) ||
+			(options?.triggerTurn === true &&
+				(this._compactionAbortController !== undefined ||
+					this._autoCompactionAbortController !== undefined ||
+					this.agent.hasQueuedMessages()))
+		) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
 				this.agent.steer(appMessage);
 			}
+			if (this.isIdle) this._scheduleQueuedPrompt();
 		} else if (options?.triggerTurn) {
-			if (this._isEmittingAgentSettled) {
-				this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options));
-				return;
-			}
 			await this._startRun({ messageType: "custom", message: appMessage });
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its

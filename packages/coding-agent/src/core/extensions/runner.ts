@@ -1120,7 +1120,11 @@ export class ExtensionRunner {
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
-						if (result.cancel) {
+						// Stop at the first checkpoint to avoid duplicate summaries and overwritten metadata.
+						if (
+							result.cancel ||
+							(event.type === "session_before_compact" && (result as SessionBeforeCompactResult).compaction)
+						) {
 							return result as RunnerEmitResult<TEvent>;
 						}
 					}

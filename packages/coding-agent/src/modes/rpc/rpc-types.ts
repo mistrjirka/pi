@@ -199,8 +199,13 @@ export type RpcResponse =
 			success: true;
 			data: { models: Model<any>[] };
 	  }
-
-	| { id?: string; type: "response"; command: "refresh_provider_models"; success: true; data: { models: Model<any>[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "refresh_provider_models";
+			success: true;
+			data: { models: Model<any>[] };
+	  }
 
 	// Thinking
 	| { id?: string; type: "response"; command: "set_thinking_level"; success: true }

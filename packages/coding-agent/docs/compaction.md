@@ -298,6 +298,8 @@ Extensions can intercept and customize both compaction and branch summarization.
 
 Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
 
+Handlers run in extension load order and registration order within each extension. The first `{ cancel: true }` or `{ compaction: ... }` result stops dispatch to later handlers. Return `undefined` or `{}` to defer. Register cancellation guards before custom compactors. If no handler cancels or supplies a checkpoint, Pi uses default compaction. After success, every `session_compact` handler still receives the saved checkpoint.
+
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
   const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
