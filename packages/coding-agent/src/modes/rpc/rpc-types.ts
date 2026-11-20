@@ -52,6 +52,7 @@ export type RpcCommand =
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
+	| { id?: string; type: "refresh_provider_models"; providerId: string }
 
 	// Thinking
 	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
@@ -198,6 +199,8 @@ export type RpcResponse =
 			success: true;
 			data: { models: Model<any>[] };
 	  }
+
+	| { id?: string; type: "response"; command: "refresh_provider_models"; success: true; data: { models: Model<any>[] } }
 
 	// Thinking
 	| { id?: string; type: "response"; command: "set_thinking_level"; success: true }

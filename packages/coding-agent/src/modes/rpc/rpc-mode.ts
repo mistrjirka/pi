@@ -545,6 +545,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "get_available_models", { models });
 			}
 
+			case "refresh_provider_models": {
+				// Authentication is handled by pi-ai's shared locked auth.json store.
+				// This command never accepts or returns credentials.
+				if (typeof command.providerId !== "string" ||
+					!/^[-a-z0-9]{1,64}$/.test(command.providerId)) {
+					return error(id, "refresh_provider_models", "Invalid provider ID");
+				}
+				if (session.isStreaming || session.isCompacting) {
+					return error(id, "refresh_provider_models", "Wait for the current agent turn to finish");
+				}
+				await session.modelRuntime.refresh({ providers: [command.providerId], allowNetwork: false });
+				return success(id, "refresh_provider_models", {
+					models: session.modelRuntime.getAvailableSnapshot(),
+				});
+			}
+
 			// =================================================================
 			// Thinking
 			// =================================================================
