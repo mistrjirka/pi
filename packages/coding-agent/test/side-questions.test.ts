@@ -265,6 +265,79 @@ describe("side-question snapshots", () => {
 		expect(f.calls).toHaveLength(0);
 	});
 
+	it.each(["context edit", "compaction"] as const)(
+		"rejects stale native context after a boundary %s until a new main request",
+		async (change) => {
+			let mutate = true;
+			let hooks = 0;
+			let lifecycleEvents = 0;
+			const f = await fixture({
+				live: true,
+				extensions: [
+					(pi) => {
+						pi.on("context", () => {
+							hooks++;
+						});
+						pi.on("before_provider_request", () => {
+							hooks++;
+						});
+						pi.on("before_provider_headers", () => {
+							hooks++;
+						});
+						pi.on("session_tree", () => {
+							lifecycleEvents++;
+						});
+						pi.on("session_compact", () => {
+							lifecycleEvents++;
+						});
+						pi.on("turn_end", (event) => {
+							if (!mutate) return;
+							mutate = false;
+							if (change === "compaction") {
+								return {
+									entries: [{ type: "compaction", summary: "Changed context", firstKeptEntryId: null }],
+								};
+							}
+							const user = event.context.contextEntries.find(
+								(entry) => entry.sourceEntry.type === "message" && entry.sourceEntry.message.role === "user",
+							);
+							expect(user).toBeDefined();
+							return {
+								entries: [
+									{
+										type: "context_edit",
+										targetId: user!.sourceEntry.id,
+										replacement: { content: "Changed context" },
+									},
+								],
+							};
+						});
+					},
+				],
+			});
+			f.faux.setResponses([
+				fauxAssistantMessage("Answer"),
+				(context) => {
+					expect(JSON.stringify(context)).toContain("Changed context");
+					expect(JSON.stringify(context)).not.toContain("Old context");
+					return fauxAssistantMessage("Fresh answer");
+				},
+			]);
+			await f.session.prompt("Old context");
+			const entries = structuredClone(f.sessionManager.getEntries());
+			const hooksBefore = hooks;
+			await expect(f.snapshot()).rejects.toThrow("Run a normal turn");
+			expect(f.sessionManager.getEntries()).toEqual(entries);
+			expect(hooks).toBe(hooksBefore);
+			expect(lifecycleEvents).toBe(0);
+			expect(f.calls).toHaveLength(0);
+			await f.session.prompt("Continue with changed context");
+			const hooksAfter = hooks;
+			await expect(f.snapshot()).resolves.toMatchObject({ source: "native-live" });
+			expect(hooks).toBe(hooksAfter);
+		},
+	);
+
 	it("rejects unsafe provider hooks for generic replay and honors pre-cancelled requests", async () => {
 		const f = await fixture({
 			extensions: [

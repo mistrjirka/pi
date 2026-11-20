@@ -113,6 +113,12 @@ export class SideQuestionSnapshots {
 		// An SDK-native aside uses the provider's already transformed live query. Replaying context
 		// hooks or requiring a local transcript capture would reject a safe capability unnecessarily.
 		if (provider.sideQuestionUsesLiveContext) {
+			// Boundary edits can change Pi history without notifying the provider's live query.
+			if (captured?.sessionId === sessionId && !reusable) {
+				throw new Error(
+					"The live provider context is stale after this session change. Run a normal turn before asking a side question.",
+				);
+			}
 			return {
 				sessionId,
 				model: structuredClone(model),
