@@ -14,6 +14,7 @@ import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
+	type CacheCompactionMaintenance,
 	CacheWarmer,
 	type CacheWarmingAction,
 	type CacheWarmingDecision,
@@ -87,6 +88,7 @@ function fakeRuntime(
 		decide?: (event: CacheWarmingDecisionEvent) => CacheWarmingAction | Promise<CacheWarmingAction>;
 		mode?: CacheWarmingMode;
 		branch?: SessionEntry[];
+		maintenance?: CacheCompactionMaintenance;
 	} = {},
 ) {
 	const calls: Array<{ model: Model<Api>; options: ModelsSimpleStreamOptions | undefined }> = [];
@@ -110,6 +112,7 @@ function fakeRuntime(
 			events.push(event);
 			return options.decide?.(event) ?? event.action;
 		},
+		options.maintenance,
 	);
 	warmer.onWarmed = (entry) => warmedEntries.push(entry);
 	return { warmer, calls, events, warmedEntries, appendUsage, state };
@@ -264,7 +267,7 @@ describe("cache warming", () => {
 		const unsupported = fakeRuntime();
 		unsupported.state.mode = "off";
 		unsupported.warmer.start(request(), current);
-		expect(unsupported.warmer.status.reason).toBe("cache warming disabled");
+		expect(unsupported.warmer.status.reason).toBe("cache maintenance disabled");
 		unsupported.state.mode = "idle";
 		unsupported.warmer.start(request(unknownModel), current);
 		expect(unsupported.warmer.status.reason).toBe("cache lifetime unavailable");
@@ -371,5 +374,116 @@ describe("ExtensionRunner.emitCacheWarmingDecision", () => {
 		};
 
 		expect(await runner.emitCacheWarmingDecision(event)).toBe("stop");
+	});
+});
+
+describe("cache compaction scheduling", () => {
+	it("prepares once before expiry and never also sends a warming request", async () => {
+		vi.useFakeTimers();
+		const prepare = vi.fn(async () => true);
+		const { warmer, calls } = fakeRuntime({
+			branch: branchWithPrompt(0),
+			maintenance: { getMode: () => "compact", canCompact: () => true, prepare },
+		});
+		warmer.start(request(), current);
+		expect(warmer.status).toMatchObject({ action: "compact", state: "scheduled" });
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(prepare).toHaveBeenCalledTimes(1);
+		expect(calls).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(600_000);
+		expect(prepare).toHaveBeenCalledTimes(1);
+	});
+
+	it("waits for a safe phase, then skips a missed deadline", async () => {
+		vi.useFakeTimers();
+		let safe = false;
+		const prepare = vi.fn(async () => true);
+		const { warmer } = fakeRuntime({
+			maintenance: { getMode: () => "compact", canCompact: () => safe, prepare },
+		});
+		warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(prepare).not.toHaveBeenCalled();
+		safe = true;
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(prepare).toHaveBeenCalledTimes(1);
+		safe = false;
+		warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(300_000);
+		safe = true;
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(prepare).toHaveBeenCalledTimes(1);
+		expect(warmer.status.reason).toBe("cache refresh deadline missed");
+	});
+
+	it("waits for verified lifetime and binds it to the exact main request", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const prepare = vi.fn(async () => true);
+		const { warmer } = fakeRuntime({
+			maintenance: { getMode: () => "compact", canCompact: () => true, prepare },
+		});
+		const first = request(unknownModel);
+		const second = request(unknownModel);
+		warmer.start(first, current);
+		warmer.start(second, current);
+		warmer.observeTiming(first, 300_000);
+		expect(warmer.status.reason).toBe("cache lifetime unavailable");
+		await vi.advanceTimersByTimeAsync(60_000);
+		warmer.observeTiming(second, 3_600_000);
+		warmer.onAgentSettled();
+		expect(warmer.status.nextWarmAt).toBe(3_240_000);
+		await vi.advanceTimersByTimeAsync(3_180_000);
+		expect(prepare).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels preparation when maintenance is disabled without sending a warm request", async () => {
+		vi.useFakeTimers();
+		let mode: "compact" | "off" = "compact";
+		let signal: AbortSignal | undefined;
+		let finish = () => {};
+		const { warmer, calls } = fakeRuntime({
+			maintenance: {
+				getMode: () => mode,
+				canCompact: () => true,
+				prepare: (requestSignal) => {
+					signal = requestSignal;
+					return new Promise<boolean>((resolve) => {
+						finish = () => resolve(true);
+					});
+				},
+			},
+		});
+		warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		mode = "off";
+		warmer.onModeChanged();
+		expect(signal?.aborted).toBe(true);
+		finish();
+		await vi.advanceTimersByTimeAsync(600_000);
+		expect(calls).toHaveLength(0);
+		expect(warmer.status.reason).toBe("cache maintenance disabled");
+	});
+
+	it("times repeated warming from request start, not slow response completion", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		let finish = () => {};
+		const { warmer, calls } = fakeRuntime({
+			result: (model) =>
+				new Promise((resolve) => {
+					finish = () => resolve(response(model));
+				}),
+		});
+		warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		await vi.advanceTimersByTimeAsync(60_000);
+		finish();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(warmer.status.nextWarmAt).toBe(540_000);
+		await vi.advanceTimersByTimeAsync(210_000);
+		expect(calls).toHaveLength(2);
+		finish();
+		warmer.cancel();
 	});
 });

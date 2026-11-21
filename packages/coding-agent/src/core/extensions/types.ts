@@ -59,6 +59,7 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
+import type { CompactionCacheRequest } from "../cache-compaction.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -69,6 +70,7 @@ import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "..
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { ProviderUsageRequest, ProviderUsageSnapshot } from "../provider-usage.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -79,7 +81,7 @@ import type {
 	SessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
-import type { Settings } from "../settings-manager.ts";
+import type { CompactionMethod, Settings } from "../settings-manager.ts";
 import type { SideQuestionSnapshot } from "../side-questions.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
@@ -380,6 +382,8 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
+	/** Selected compaction method. Older hosts may omit this accessor. */
+	getCompactionMethod?(): CompactionMethod;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
@@ -808,11 +812,15 @@ export interface SessionBeforeForkEvent {
 /** Fired before context compaction (can be cancelled or customized) */
 export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
+	/** The selected engine. Undefined only on older hosts. */
+	method?: CompactionMethod;
+	/** Immutable last main request. Pending assistant/tool output is retained separately. */
+	cacheRequest?: CompactionCacheRequest;
 	preparation: CompactionPreparation;
 	branchEntries: SessionEntry[];
 	customInstructions?: string;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
-	reason: "manual" | "threshold" | "overflow";
+	reason: "manual" | "threshold" | "overflow" | "cache-expiry";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
 	signal: AbortSignal;
@@ -824,7 +832,7 @@ export interface SessionCompactEvent {
 	compactionEntry: CompactionEntry;
 	fromExtension: boolean;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
-	reason: "manual" | "threshold" | "overflow";
+	reason: "manual" | "threshold" | "overflow" | "cache-expiry";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
 }
@@ -833,7 +841,7 @@ export interface SessionCompactEvent {
 export interface SessionCompactFailedEvent {
 	type: "session_compact_failed";
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
-	reason: "manual" | "threshold" | "overflow";
+	reason: "manual" | "threshold" | "overflow" | "cache-expiry";
 	/** Error text when compaction failed for a non-abort reason. */
 	errorMessage?: string;
 	/** True when compaction was cancelled or aborted. */
@@ -942,6 +950,11 @@ export interface AfterProviderResponseEvent {
 	type: "after_provider_response";
 	status: number;
 	headers: Record<string, string>;
+}
+
+/** Read subscription usage without starting a model turn. The first provider result wins. */
+export interface ProviderUsageEvent extends ProviderUsageRequest {
+	type: "provider_usage";
 }
 
 /** Fired for a parsed provider stream event before Pi normalizes it. */
@@ -1450,6 +1463,7 @@ export type ExtensionEvent =
 	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
 	| ProviderStreamEvent
+	| ProviderUsageEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
@@ -1697,6 +1711,10 @@ export interface ExtensionAPI {
 	on(event: "before_provider_headers", handler: ExtensionHandler<BeforeProviderHeadersEvent>): () => void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): () => void;
 	on(event: "provider_stream_event", handler: ExtensionHandler<ProviderStreamEvent>): () => void;
+	on(
+		event: "provider_usage",
+		handler: ExtensionHandler<ProviderUsageEvent, ProviderUsageSnapshot | undefined>,
+	): () => void;
 	on(
 		event: "before_agent_start",
 		handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>,

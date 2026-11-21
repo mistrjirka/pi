@@ -25,6 +25,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { readProviderUsage } from "../../core/provider-usage.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { writeDiagnosticsToStderr } from "../diagnostics-stderr.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
@@ -511,11 +512,47 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					compactionMethod: session.compactionMethod,
+					cacheMaintenance: session.cacheMaintenance,
+					cacheMaintenanceStatus: session.cacheMaintenanceStatus,
+					compactionMethods: session.compactionMethods,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
 					queue: session.getQueueState(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "get_provider_usage": {
+				const usageSession = session;
+				const model = usageSession.model;
+				const sessionId = usageSession.sessionId;
+				if (!model) {
+					return success(id, "get_provider_usage", {
+						provider: "",
+						status: "unavailable",
+						observedAt: null,
+						limits: [],
+						source: "provider",
+					});
+				}
+				const snapshot = await readProviderUsage({
+					provider: model.provider,
+					modelId: model.id,
+					read: (request) =>
+						usageSession.extensionRunner.emitProviderUsage({ type: "provider_usage", ...request }),
+					isCurrent: () =>
+						session === usageSession &&
+						usageSession.sessionId === sessionId &&
+						usageSession.model?.provider === model.provider &&
+						usageSession.model?.id === model.id,
+				});
+				return success(id, "get_provider_usage", snapshot);
+			}
+
+			case "set_input_active": {
+				session.setInputActive(command.active);
+				return success(id, "set_input_active");
 			}
 
 			// =================================================================
@@ -608,6 +645,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			case "set_compaction_method": {
+				session.setCompactionMethod(command.method);
+				return success(id, "set_compaction_method");
+			}
+
+			case "set_cache_maintenance": {
+				session.setCacheMaintenance(command.mode);
+				return success(id, "set_cache_maintenance");
 			}
 
 			// =================================================================
@@ -838,7 +885,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		const command = parsed as RpcCommand;
-		const queueError = validateQueueInput(parsed);
+		const queueError = validateQueueInput(parsed) ?? validateMaintenanceInput(parsed);
 		if (queueError) {
 			output(error(command.id, command.type, queueError));
 			return;
@@ -940,6 +987,27 @@ function validateQueueInput(value: unknown): string | undefined {
 			))
 	) {
 		return "images must contain ImageContent objects.";
+	}
+	return undefined;
+}
+
+/** Validate maintenance settings only at the untyped JSONL input boundary. */
+function validateMaintenanceInput(value: unknown): string | undefined {
+	if (typeof value !== "object" || value === null || !("type" in value)) return undefined;
+	const command = value as Record<string, unknown>;
+	if (command.type === "set_compaction_method" && command.method !== "cache-aware" && command.method !== "extension") {
+		return "method must be 'cache-aware' or 'extension'.";
+	}
+	if (
+		command.type === "set_cache_maintenance" &&
+		command.mode !== "compact" &&
+		command.mode !== "keep-warm" &&
+		command.mode !== "off"
+	) {
+		return "mode must be 'compact', 'keep-warm', or 'off'.";
+	}
+	if (command.type === "set_input_active" && typeof command.active !== "boolean") {
+		return "active must be a boolean.";
 	}
 	return undefined;
 }

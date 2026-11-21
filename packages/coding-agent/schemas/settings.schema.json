@@ -113,6 +113,19 @@
           "type": "boolean",
           "default": true
         },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "cache-aware"
+            },
+            {
+              "type": "string",
+              "const": "extension"
+            }
+          ],
+          "default": "cache-aware"
+        },
         "reserveTokens": {
           "type": "integer",
           "minimum": 0,
@@ -668,6 +681,24 @@
         }
       ],
       "description": "HTTP header or body idle timeout in milliseconds; 0 or \"disabled\" disables it."
+    },
+    "cacheMaintenance": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "type": "string",
+          "const": "keep-warm"
+        },
+        {
+          "type": "string",
+          "const": "off"
+        }
+      ],
+      "description": "Before cache expiry, prepare compaction during tool waits, keep the cache warm, or do nothing. Global only.",
+      "default": "compact"
     },
     "cacheWarming": {
       "anyOf": [

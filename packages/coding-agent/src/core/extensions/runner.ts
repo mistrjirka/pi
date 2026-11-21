@@ -17,6 +17,7 @@ import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { ProviderUsageSnapshot } from "../provider-usage.ts";
 import type { SessionManager } from "../session-manager.ts";
 import { getSideQuestionSnapshot } from "../side-questions.ts";
 import {
@@ -71,6 +72,7 @@ import type {
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
 	ProviderConfig,
+	ProviderUsageEvent,
 	RegisteredCommand,
 	RegisteredTool,
 	ReplacedSessionContext,
@@ -192,6 +194,7 @@ type RunnerEmitEvent = Exclude<
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
+	| ProviderUsageEvent
 	| BeforeAgentStartEvent
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
@@ -626,6 +629,11 @@ export class ExtensionRunner {
 		});
 	}
 
+	/** Whether an extension is waiting for a user-facing dialog. */
+	get isAwaitingInput(): boolean {
+		return this.uiPromptDepth > 0;
+	}
+
 	getUIContext(): ExtensionUIContext {
 		return this.uiContext;
 	}
@@ -962,6 +970,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.getContextUsageFn();
 			},
+			getCompactionMethod: () => {
+				runner.assertActive();
+				return runner.runtime.getSettings().compaction?.method === "extension" ? "extension" : "cache-aware";
+			},
 			compact: (options) => {
 				runner.assertActive();
 				runner.compactFn(options);
@@ -1142,6 +1154,19 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/** Return the first account-bound usage snapshot without invoking another provider. */
+	async emitProviderUsage(event: ProviderUsageEvent): Promise<ProviderUsageSnapshot | undefined> {
+		const ctx = this.createContext();
+		for (const { handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) {
+				event.signal.throwIfAborted();
+				const result = (await handler(event, ctx)) as ProviderUsageSnapshot | undefined;
+				if (result !== undefined) return result;
+			}
+		}
+		return undefined;
 	}
 
 	/** Returns the event's own action unless a handler overrides it; the last override wins. */

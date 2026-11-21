@@ -7,9 +7,15 @@
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { PromptDisposition, QueuedInputDisposition, SessionStats } from "../../core/agent-session.ts";
+import type {
+	AgentSession,
+	PromptDisposition,
+	QueuedInputDisposition,
+	SessionStats,
+} from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ProviderUsageSnapshot } from "../../core/provider-usage.ts";
 import type { QueueState } from "../../core/queued-input.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -47,6 +53,8 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_provider_usage" }
+	| { id?: string; type: "set_input_active"; active: boolean }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -66,6 +74,8 @@ export type RpcCommand =
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
+	| { id?: string; type: "set_compaction_method"; method: "cache-aware" | "extension" }
+	| { id?: string; type: "set_cache_maintenance"; mode: "compact" | "keep-warm" | "off" }
 
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
@@ -124,6 +134,10 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	compactionMethod: AgentSession["compactionMethod"];
+	cacheMaintenance: AgentSession["cacheMaintenance"];
+	cacheMaintenanceStatus: AgentSession["cacheMaintenanceStatus"];
+	compactionMethods: AgentSession["compactionMethods"];
 	messageCount: number;
 	pendingMessageCount: number;
 	queue: QueueState;
@@ -176,6 +190,8 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_provider_usage"; success: true; data: ProviderUsageSnapshot }
+	| { id?: string; type: "response"; command: "set_input_active"; success: true }
 
 	// Model
 	| {
@@ -231,6 +247,8 @@ export type RpcResponse =
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
+	| { id?: string; type: "response"; command: "set_compaction_method"; success: true }
+	| { id?: string; type: "response"; command: "set_cache_maintenance"; success: true }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }

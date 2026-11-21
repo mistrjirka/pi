@@ -17,6 +17,11 @@ const CompactionModelOverrideSchema = Type.Object({
 
 const CompactionSettingsSchema = Type.Object({
 	enabled: Type.Optional(Type.Boolean({ default: SETTINGS_DEFAULTS.compaction.enabled })),
+	method: Type.Optional(
+		Type.Union([Type.Literal("cache-aware"), Type.Literal("extension")], {
+			default: SETTINGS_DEFAULTS.compaction.method,
+		}),
+	),
 	reserveTokens: Type.Optional(nonNegativeSafeInteger({ default: SETTINGS_DEFAULTS.compaction.reserveTokens })),
 	keepRecentTokens: Type.Optional(nonNegativeSafeInteger({ default: SETTINGS_DEFAULTS.compaction.keepRecentTokens })),
 	modelOverrides: Type.Optional(
@@ -411,6 +416,13 @@ export const SettingsSchema = Type.Object(
 				description: 'HTTP header or body idle timeout in milliseconds; 0 or "disabled" disables it.',
 			}),
 		),
+		cacheMaintenance: Type.Optional(
+			Type.Union([Type.Literal("compact"), Type.Literal("keep-warm"), Type.Literal("off")], {
+				description:
+					"Before cache expiry, prepare compaction during tool waits, keep the cache warm, or do nothing. Global only.",
+				default: SETTINGS_DEFAULTS.cacheMaintenance,
+			}),
+		),
 		cacheWarming: Type.Optional(
 			Type.Union([Type.Literal("off"), Type.Literal("streaming"), Type.Literal("idle")], {
 				description:
@@ -488,6 +500,8 @@ export type PackageSource = Static<typeof PackageSourceSchema>;
 export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutput"]>;
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
 export type CacheWarmingMode = NonNullable<SettingsInput["cacheWarming"]>;
+export type CacheMaintenanceMode = NonNullable<SettingsInput["cacheMaintenance"]>;
+export type CompactionMethod = NonNullable<CompactionSettings["method"]>;
 export interface Settings extends Omit<SettingsInput, "queueMode" | "retry" | "skills" | "websockets"> {
 	retry?: RetrySettings;
 	skills?: string[];

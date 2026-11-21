@@ -339,6 +339,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager,
 		() => settingsManager.getCacheWarmingMode(),
 		async (event) => extensionRunnerRef.current?.emitCacheWarmingDecision(event) ?? event.action,
+		{
+			getMode: () => settingsManager.getCacheMaintenanceMode(),
+			canCompact: () => session.canPrepareCacheCompaction,
+			canWarm: (request) => !modelRuntime.getProvider(request.model.provider)?.sideQuestionUsesLiveContext,
+			prepare: (signal) => session.prepareCacheCompaction(signal),
+		},
 	);
 	const buildRequestOptions = (options: ModelsSimpleStreamOptions = {}): ModelsSimpleStreamOptions => {
 		const providerRetrySettings = settingsManager.getProviderRetrySettings();
@@ -361,18 +367,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 	// Warm only requests for the selected model. Requests a virtual selection routed, or that an
 	// extension redirected, may not be repeated by the next request, so warming them could be wasted.
-	const cacheContextIsCurrent = (requestModel: Model<any>) => {
-		const messages = agent.state.messages;
-		return () => {
-			const currentModel = agent.state.model;
-			const currentMessages = agent.state.messages;
-			return (
-				currentModel.provider === requestModel.provider &&
-				currentModel.id === requestModel.id &&
-				messages.length <= currentMessages.length &&
-				messages.every((message, index) => currentMessages[index] === message)
-			);
-		};
+	const cacheContextIsCurrent = (requestModel: Model<any>, captureId: number | undefined) => () => {
+		const currentModel = agent.state.model;
+		return (
+			currentModel.provider === requestModel.provider &&
+			currentModel.id === requestModel.id &&
+			captureId !== undefined &&
+			sideQuestions?.isRequestCurrent(captureId) === true
+		);
 	};
 	const transformProviderPayload = async (payload: unknown) => {
 		const runner = extensionRunnerRef.current;
@@ -420,8 +422,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// shallow-copy the messages array or refresh the model object without changing
 			// the provider request, so top-level object identity is not a valid cache key.
 			if (options?.sessionId === sessionManager.getSessionId()) {
-				sideQuestions?.capture(model, context, requestOptions);
-				cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
+				const captureId = sideQuestions?.capture(model, context, requestOptions);
+				const warmRequest = { model, context, options: requestOptions };
+				cacheWarmer.start(warmRequest, cacheContextIsCurrent(model, captureId));
+				const onProviderStreamEvent = requestOptions.onProviderStreamEvent;
+				requestOptions.onProviderStreamEvent = async (data, responseModel) => {
+					// Custom providers report verified lifetime through the request-bound stream callback.
+					if (typeof data === "object" && data !== null && "type" in data && data.type === "prompt_cache_timing") {
+						const ttlMs = "ttlMs" in data ? data.ttlMs : undefined;
+						if (typeof ttlMs === "number" && Number.isFinite(ttlMs) && ttlMs > 0) {
+							if (captureId !== undefined) sideQuestions?.observeCacheTiming(captureId, ttlMs);
+							cacheWarmer.observeTiming(warmRequest, ttlMs);
+						}
+					}
+					await onProviderStreamEvent?.(data, responseModel);
+				};
 			}
 			return modelRuntime.streamSimple(model, context, requestOptions);
 		},

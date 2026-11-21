@@ -2,12 +2,14 @@ import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type Api,
 	type Context,
+	getPromptCacheTtlMs,
 	type Model,
 	type ModelsSimpleStreamOptions,
 	normalizeContext,
 	type TranscriptContext,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
+import type { CompactionCacheRequest } from "./cache-compaction.ts";
 import type { ExtensionRunner } from "./extensions/runner.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import type { SessionManager, SessionProjection } from "./session-manager.ts";
@@ -34,6 +36,9 @@ export interface SideQuestionSource {
 }
 
 interface CapturedRequest {
+	id: number;
+	startedAt: number;
+	ttlMs?: number;
 	sessionId: string;
 	selectedModel: Model<Api>;
 	model: Model<Api>;
@@ -50,24 +55,64 @@ const sources = new WeakMap<SessionManager, SideQuestionSnapshots>();
 export class SideQuestionSnapshots {
 	private readonly source: SideQuestionSource;
 	private captured: CapturedRequest | undefined;
+	private captureId = 0;
 
 	constructor(source: SideQuestionSource) {
 		this.source = source;
 		sources.set(source.sessionManager, this);
 	}
 
-	capture(model: Model<Api>, context: Context, options: ModelsSimpleStreamOptions): void {
+	capture(model: Model<Api>, context: Context, options: ModelsSimpleStreamOptions): number {
 		const { agent, sessionManager } = this.source;
 		this.captured = {
+			id: ++this.captureId,
+			startedAt: Date.now(),
+			ttlMs: getPromptCacheTtlMs(model, options),
 			sessionId: sessionManager.getSessionId(),
 			selectedModel: agent.state.model,
 			model,
 			thinkingLevel: agent.state.thinkingLevel,
 			runner: this.source.getExtensionRunner(),
 			leafId: sessionManager.getLeafId(),
-			// Completed request messages are immutable. Clone only when a side question asks for them.
-			context: normalizeContext(context),
+			// Keep a private array. Completed contents are copied when an isolated request needs them.
+			context: normalizeContext({ ...context, messages: context.messages.slice() }),
 			options: copyRequestOptions(options),
+		};
+		return this.captured.id;
+	}
+
+	/** Accept cache lifetime evidence only from the captured main request. */
+	observeCacheTiming(captureId: number, ttlMs: number): void {
+		if (this.captured?.id === captureId) this.captured.ttlMs = ttlMs;
+	}
+
+	/** Use persisted provenance, since projections recreate summaries and custom messages. */
+	isRequestCurrent(captureId: number): boolean {
+		const captured = this.captured;
+		const { agent, sessionManager } = this.source;
+		return Boolean(
+			captured &&
+				captured.id === captureId &&
+				captured.sessionId === sessionManager.getSessionId() &&
+				sameModel(captured.selectedModel, agent.state.model) &&
+				captured.thinkingLevel === agent.state.thinkingLevel &&
+				captured.runner === this.source.getExtensionRunner() &&
+				extendingTailIndex(captured.leafId, sessionManager.buildSessionProjection()) !== undefined,
+		);
+	}
+
+	/** Return the exact captured input only while the current branch still extends it. */
+	getCompactionRequest(): CompactionCacheRequest | undefined {
+		const captured = this.captured;
+		if (!captured || !this.isRequestCurrent(captured.id)) return undefined;
+		return {
+			sessionId: captured.sessionId,
+			model: captured.model,
+			context: normalizeContext({ messages: structuredClone(captured.context.messages) }),
+			options: copyRequestOptions(captured.options),
+			sourceEntryId: captured.leafId,
+			startedAt: captured.startedAt,
+			ttlMs: captured.ttlMs,
 		};
 	}
 
@@ -191,6 +236,11 @@ export class SideQuestionSnapshots {
 			pendingMessagesOmitted,
 		};
 	}
+}
+
+/** Read an immutable main-request input for cache-aware compaction. */
+export function getCompactionCacheRequest(sessionManager: SessionManager): CompactionCacheRequest | undefined {
+	return sources.get(sessionManager)?.getCompactionRequest();
 }
 
 /** Read the SDK-owned snapshot source without exposing main-session mutation APIs. */

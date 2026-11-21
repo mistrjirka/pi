@@ -8,6 +8,7 @@ export const SETTINGS_DEFAULTS = {
 	followUpMode: "one-at-a-time",
 	compaction: {
 		enabled: true,
+		method: "cache-aware",
 		reserveTokens: 16384,
 		keepRecentTokens: 20000,
 	},
@@ -59,6 +60,7 @@ export const SETTINGS_DEFAULTS = {
 		inlineBudget: 3000,
 	},
 	cacheWarming: "idle",
+	cacheMaintenance: "compact",
 	tuiMode: "fullscreen",
 	fullscreenExitOutput: "transcript",
 	fullscreenScrollbar: "auto",

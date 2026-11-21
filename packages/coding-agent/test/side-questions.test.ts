@@ -8,7 +8,7 @@ import {
 	type SimpleStreamOptions,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { ModelConfig } from "../src/core/model-config.ts";
@@ -23,7 +23,9 @@ import { createTestExtensionsResult, createTestResourceLoader } from "./utilitie
 
 const sessions: AgentSession[] = [];
 
-async function fixture(options: { extensions?: ExtensionFactory[]; live?: boolean; safe?: boolean } = {}) {
+async function fixture(
+	options: { extensions?: ExtensionFactory[]; live?: boolean; safe?: boolean; maintenance?: boolean } = {},
+) {
 	const faux = fauxProvider({
 		models: [
 			{ id: "test-model", reasoning: true },
@@ -38,6 +40,12 @@ async function fixture(options: { extensions?: ExtensionFactory[]; live?: boolea
 	const calls: { context: TranscriptContext; options: SimpleStreamOptions | undefined }[] = [];
 	const provider: Provider = {
 		...faux.provider,
+		streamSimple: (model, context, requestOptions) => {
+			if (options.maintenance) {
+				void requestOptions?.onProviderStreamEvent?.({ type: "prompt_cache_timing", ttlMs: 300_000 }, model);
+			}
+			return faux.provider.streamSimple(model, context, requestOptions);
+		},
 		...(options.safe === false
 			? {}
 			: {
@@ -59,9 +67,9 @@ async function fixture(options: { extensions?: ExtensionFactory[]; live?: boolea
 		thinkingLevel: "high",
 		sessionManager,
 		settingsManager: SettingsManager.inMemory({
-			compaction: { enabled: false },
+			compaction: { enabled: options.maintenance ?? false, keepRecentTokens: 1 },
 			retry: { enabled: false },
-			cacheWarming: "off",
+			...(options.maintenance ? { cacheMaintenance: "compact" } : { cacheWarming: "off" }),
 		}),
 		resourceLoader: createTestResourceLoader({ extensionsResult }),
 		tools: ["read"],
@@ -73,9 +81,32 @@ async function fixture(options: { extensions?: ExtensionFactory[]; live?: boolea
 
 afterEach(() => {
 	while (sessions.length > 0) sessions.pop()?.dispose();
+	vi.useRealTimers();
 });
 
 describe("side-question snapshots", () => {
+	it("runs the idle expiry timer after a prior checkpoint and custom-message projection", async () => {
+		vi.useFakeTimers();
+		const f = await fixture({ maintenance: true });
+		f.sessionManager.appendCompaction("An existing checkpoint", null, 100);
+		f.session.refreshContext();
+		await f.session.sendCustomMessage({ customType: "child", content: "Earlier child message", display: true });
+		f.faux.setResponses([fauxAssistantMessage("Main answer"), fauxAssistantMessage("Expiry checkpoint")]);
+		await f.session.prompt("Continue from the existing checkpoint");
+		expect(f.session.cacheMaintenanceStatus, JSON.stringify(f.session.cacheMaintenanceStatus)).toMatchObject({
+			state: "scheduled",
+			action: "compact",
+		});
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(f.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(2);
+		expect(
+			f.session.messages.some(
+				(message) => message.role === "compactionSummary" && message.summary.includes("Expiry checkpoint"),
+			),
+		).toBe(true);
+		expect(f.faux.state.callCount).toBe(2);
+	});
+
 	it("captures the final transformed request, appends a completed answer, and never reruns context hooks", async () => {
 		let hooks = 0;
 		const f = await fixture({
@@ -345,6 +376,10 @@ describe("side-question snapshots", () => {
 					pi.on("before_provider_request", (event) => event.payload);
 				},
 			],
+		});
+		expect(f.session.compactionMethods.find((method) => method.id === "cache-aware")).toMatchObject({
+			available: false,
+			reason: "Custom provider payload or header hooks cannot be replayed safely",
 		});
 		await expect(f.snapshot()).rejects.toThrow("custom provider payload or header hooks");
 		const aborted = new AbortController();

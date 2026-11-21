@@ -11,7 +11,9 @@ import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 import type {
+	CacheMaintenanceMode,
 	CacheWarmingMode,
+	CompactionMethod,
 	CompactionModelOverride,
 	DefaultProjectTrust,
 	FullscreenExitOutput,
@@ -28,9 +30,11 @@ import type {
 
 export type {
 	BranchSummarySettings,
+	CacheMaintenanceMode,
 	CacheWarmingMode,
 	CodemodeMode,
 	CodemodeSettings,
+	CompactionMethod,
 	CompactionModelOverride,
 	CompactionSettings,
 	DefaultProjectTrust,
@@ -830,6 +834,17 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getCompactionMethod(): CompactionMethod {
+		return this.settings.compaction?.method === "extension" ? "extension" : SETTINGS_DEFAULTS.compaction.method;
+	}
+
+	setCompactionMethod(method: CompactionMethod): void {
+		this.globalSettings.compaction ??= {};
+		this.globalSettings.compaction.method = method;
+		this.markModified("compaction", "method");
+		this.save();
+	}
+
 	getCompactionEnabled(): boolean {
 		return this.settings.compaction?.enabled ?? SETTINGS_DEFAULTS.compaction.enabled;
 	}
@@ -938,6 +953,22 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** Preserve explicit older warming preferences while defaulting new sessions to compaction. */
+	getCacheMaintenanceMode(): CacheMaintenanceMode {
+		const mode = this.globalSettings.cacheMaintenance;
+		if (mode === "compact" || mode === "keep-warm" || mode === "off") return mode;
+		if (this.globalSettings.cacheWarming === "off") return "off";
+		if (this.globalSettings.cacheWarming === "streaming" || this.globalSettings.cacheWarming === "idle")
+			return "keep-warm";
+		return SETTINGS_DEFAULTS.cacheMaintenance;
+	}
+
+	setCacheMaintenanceMode(mode: CacheMaintenanceMode): void {
+		this.globalSettings.cacheMaintenance = mode;
+		this.markModified("cacheMaintenance");
+		this.save();
+	}
+
 	/** Read from global settings only because warming costs money. */
 	getCacheWarmingMode(): CacheWarmingMode {
 		const mode = this.globalSettings.cacheWarming;
@@ -946,7 +977,9 @@ export class SettingsManager {
 
 	setCacheWarmingMode(mode: CacheWarmingMode): void {
 		this.globalSettings.cacheWarming = mode;
+		this.globalSettings.cacheMaintenance = mode === "off" ? "off" : "keep-warm";
 		this.markModified("cacheWarming");
+		this.markModified("cacheMaintenance");
 		this.save();
 	}
 

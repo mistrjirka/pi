@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
 import type { SessionEntry, SessionManager, UsageEntry } from "./session-manager.ts";
-import type { CacheWarmingMode } from "./settings-manager.ts";
+import type { CacheMaintenanceMode, CacheWarmingMode } from "./settings-manager.ts";
 
 export type { CacheWarmingAction, CacheWarmingDecision };
 
@@ -47,6 +47,8 @@ export interface CacheWarmingDecisionEventResult {
 }
 
 export interface CacheWarmingStatus {
+	/** The one maintenance action that owns this request generation. */
+	action?: "warm" | "compact";
 	/** "scheduled": a refresh timer is armed; "refreshing": a warm request is in flight. */
 	state: "inactive" | "scheduled" | "refreshing";
 	/** Why nothing is scheduled. */
@@ -65,7 +67,22 @@ export interface CacheWarmRequest {
 	options: ModelsSimpleStreamOptions;
 }
 
+export interface CacheCompactionMaintenance {
+	getMode(): CacheMaintenanceMode;
+	canCompact(): boolean;
+	prepare(signal: AbortSignal): Promise<boolean>;
+	canWarm?(request: CacheWarmRequest): boolean;
+}
+
+interface CapturedWarmRequest {
+	request: CacheWarmRequest;
+	isCurrent: () => boolean;
+	startedAt: number;
+	ttlMs?: number;
+}
+
 interface ActiveRun extends CacheWarmRequest {
+	action: "warm" | "compact";
 	/** False once the session's model or messages no longer match the request. */
 	isCurrent: () => boolean;
 	ttlMs: number;
@@ -88,6 +105,8 @@ interface ActiveRun extends CacheWarmRequest {
  */
 export class CacheWarmer {
 	private run?: ActiveRun;
+	private captured?: CapturedWarmRequest;
+	private readonly maintenance?: CacheCompactionMaintenance;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
 	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
@@ -102,21 +121,28 @@ export class CacheWarmer {
 		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
+		maintenance?: CacheCompactionMaintenance,
 	) {
 		this.models = models;
 		this.sessionManager = sessionManager;
 		this.getMode = getMode;
 		this.decide = decide;
+		this.maintenance = maintenance;
 		this.inactive = { state: "inactive", reason: "waiting for first request" };
 	}
 
 	get status(): CacheWarmingStatus {
-		if (this.getMode() === "off") return { state: "inactive", reason: "cache warming disabled" };
+		if (this.maintenance?.getMode() === "off" || (!this.maintenance && this.getMode() === "off")) {
+			return { state: "inactive", reason: "cache maintenance disabled" };
+		}
 		const run = this.run;
 		if (!run) return this.inactive;
 		if (!run.isCurrent()) return { state: "inactive", reason: "conversation context changed" };
-		const decision = this.evaluate(run);
 		const refreshing = run.timer === undefined;
+		if (run.action === "compact") {
+			return { state: refreshing ? "refreshing" : "scheduled", action: "compact", nextWarmAt: run.nextWarmAt };
+		}
+		const decision = this.evaluate(run);
 		if (!decision.economicsAvailable && !refreshing) {
 			return { state: "inactive", reason: "cache economics unavailable" };
 		}
@@ -128,19 +154,43 @@ export class CacheWarmer {
 		};
 	}
 
-	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
+	/** Capture a real request and start its single cache-maintenance timer. */
 	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
+		this.captured = {
+			request,
+			isCurrent,
+			startedAt: Date.now(),
+			ttlMs: getPromptCacheTtlMs(request.model, request.options),
+		};
+		this.arm(this.captured);
+	}
+
+	/** Replace estimated lifetime only when evidence belongs to the current main request. */
+	observeTiming(request: CacheWarmRequest, ttlMs: number): void {
+		if (this.captured?.request !== request) return;
+		this.captured.ttlMs = ttlMs;
+		// Do not cancel a summary or refresh already using this cache entry.
+		if (this.run && this.run.timer === undefined) return;
+		this.arm(this.captured);
+	}
+
+	private arm(captured: CapturedWarmRequest): void {
 		this.clearRun();
+		const { request, isCurrent, startedAt, ttlMs } = captured;
+		const maintenanceMode = this.maintenance?.getMode() ?? "keep-warm";
 		const mode = this.getMode();
-		if (mode === "off") {
-			this.stop("cache warming disabled");
+		if (maintenanceMode === "off" || (maintenanceMode === "keep-warm" && mode === "off")) {
+			this.stop("cache maintenance disabled");
 			return;
 		}
-		if (!isCacheWarmingReplayable(request.model, request.options)) {
+		const action = maintenanceMode === "compact" ? "compact" : "warm";
+		if (
+			action === "warm" &&
+			(!isCacheWarmingReplayable(request.model, request.options) || this.maintenance?.canWarm?.(request) === false)
+		) {
 			this.stop("request cannot be replayed safely");
 			return;
 		}
-		const ttlMs = getPromptCacheTtlMs(request.model, request.options);
 		if (ttlMs === undefined) {
 			this.stop(
 				request.options.cacheRetention === "none"
@@ -156,27 +206,29 @@ export class CacheWarmer {
 		}
 		this.run = {
 			...request,
+			action,
 			isCurrent,
 			ttlMs,
 			delayMs,
+			startedAt,
 			refreshDeadlineAt: 0,
-			startedAt: Date.now(),
 			controller: new AbortController(),
 			phase: "streaming",
 			nextWarmAt: 0,
 			extensionOverride: false,
 		};
-		this.schedule(this.run);
+		this.schedule(this.run, startedAt);
 	}
 
 	onAgentSettled(): void {
 		const run = this.run;
 		if (!run) return;
-		if (this.getMode() === "streaming") {
+		if (run.action === "warm" && this.getMode() === "streaming") {
 			this.stop("agent run settled");
 			return;
 		}
 		run.phase = "idle";
+		if (run.action === "compact") return;
 		const deadline = run.startedAt + CACHE_WARMING_MAX_IDLE_AGE_MS;
 		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop("30-minute idle safety limit reached");
@@ -185,13 +237,11 @@ export class CacheWarmer {
 
 	/** Reconcile an active run after the persisted warming mode changes. */
 	onModeChanged(): void {
-		const run = this.run;
-		if (!run) return;
-		const reason = this.getModeStopReason(run);
-		if (reason) this.stop(reason);
+		if (this.captured) this.arm(this.captured);
 	}
 
 	cancel(): void {
+		this.captured = undefined;
 		this.stop("inactive");
 	}
 
@@ -208,16 +258,16 @@ export class CacheWarmer {
 		this.inactive = { state: "inactive", reason, ...stopped };
 	}
 
-	private schedule(run: ActiveRun): void {
+	private schedule(run: ActiveRun, lastRequestStartedAt: number): void {
 		run.extensionOverride = false;
-		run.nextWarmAt = Date.now() + run.delayMs;
+		run.nextWarmAt = lastRequestStartedAt + run.delayMs;
 		// A timer can run late after sleep or event-loop blockage. Keep half of
 		// the planned pre-expiry margin for that delay and request dispatch; a
 		// late refresh is likely a full-price cache write, not a cache warm.
 		run.refreshDeadlineAt = run.nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2);
 		const deadline =
 			run.startedAt + (run.phase === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : CACHE_WARMING_MAX_AGE_MS);
-		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
+		if (run.action === "warm" && (run.nextWarmAt > deadline || Date.now() >= deadline)) {
 			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
 			return;
 		}
@@ -229,6 +279,28 @@ export class CacheWarmer {
 		run.timer = undefined;
 		if (!this.validateRun(run)) return;
 		if (this.refreshDeadlineMissed(run)) return;
+		if (run.action === "compact") {
+			if (!this.maintenance?.canCompact()) {
+				run.nextWarmAt = Math.min(Date.now() + 1000, run.refreshDeadlineAt + 1);
+				run.timer = setTimeout(() => void this.refresh(run), Math.max(1, run.nextWarmAt - Date.now()));
+				run.timer.unref?.();
+				return;
+			}
+			try {
+				const prepared = await this.maintenance.prepare(run.controller.signal);
+				if (this.run === run) {
+					this.run = undefined;
+					this.inactive = {
+						state: "inactive",
+						action: "compact",
+						reason: prepared ? "compaction prepared" : "nothing to compact",
+					};
+				}
+			} catch {
+				if (this.run === run) this.stop("cache compaction unavailable or cancelled");
+			}
+			return;
+		}
 		const decision = this.evaluate(run);
 		const { warmCost, missCost, continuationProbability } = decision;
 		let action = decision.action;
@@ -256,6 +328,7 @@ export class CacheWarmer {
 		}
 
 		run.extensionOverride = extensionOverride;
+		const refreshStartedAt = Date.now();
 		try {
 			const message = await this.models
 				.streamSimple(run.model, run.context, getCacheWarmingRequestOptions(run.options, run.controller.signal))
@@ -274,7 +347,7 @@ export class CacheWarmer {
 		} catch {
 			// Cache warming is best-effort and must not affect the active agent run.
 		}
-		if (this.run === run) this.schedule(run);
+		if (this.run === run) this.schedule(run, refreshStartedAt);
 	}
 
 	private refreshDeadlineMissed(run: ActiveRun): boolean {
@@ -293,8 +366,11 @@ export class CacheWarmer {
 
 	private getModeStopReason(run: ActiveRun): string | undefined {
 		const mode = this.getMode();
-		if (mode === "off") return "cache warming disabled";
-		if (mode === "streaming" && run.phase === "idle") return "agent run settled";
+		const maintenanceMode = this.maintenance?.getMode() ?? "keep-warm";
+		if (maintenanceMode === "off" || (maintenanceMode === "keep-warm" && mode === "off"))
+			return "cache maintenance disabled";
+		if ((maintenanceMode === "compact") !== (run.action === "compact")) return "cache maintenance changed";
+		if (run.action === "warm" && mode === "streaming" && run.phase === "idle") return "agent run settled";
 		return undefined;
 	}
 
@@ -337,6 +413,11 @@ export function formatCacheWarmingStatus(status: CacheWarmingStatus, now = Date.
 	const decision = status.decision;
 	// A decision is attached once pi (or an extension) acted on it; "inactive"
 	// without one never got that far.
+	if (status.action === "compact" && status.state !== "inactive") {
+		return status.state === "refreshing"
+			? "Preparing compaction before cache expiry"
+			: `${formatCacheWarmingDecisionTime(status.nextWarmAt, now)} (compact before estimated cache expiry)`;
+	}
 	if (!decision || (status.state === "inactive" && !decision.economicsAvailable && !status.extensionOverride)) {
 		return `Inactive (${status.reason ?? "unknown reason"})`;
 	}
