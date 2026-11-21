@@ -296,6 +296,23 @@ describe("side-question snapshots", () => {
 		expect(f.calls).toHaveLength(0);
 	});
 
+	it("preserves provider model provenance through a native aside without sharing mutable fields", async () => {
+		const f = await fixture({ live: true });
+		const selected = f.session.model;
+		if (!selected) throw new Error("missing selected model");
+		const marker = Symbol.for("pi-doppelclaude.model");
+		Object.defineProperty(selected, marker, { value: selected.id, enumerable: true });
+		const snapshot = await f.snapshot();
+		expect(snapshot.source).toBe("native-live");
+		expect(snapshot.model).not.toBe(selected);
+		expect(Object.getOwnPropertyDescriptor(snapshot.model, marker)?.value).toBe(selected.id);
+		expect(snapshot.model.cost).not.toBe(selected.cost);
+		snapshot.model.cost.input = 99;
+		expect(selected.cost.input).not.toBe(99);
+		// Normal copies still lose symbols: only native provider side questions require them.
+		expect(Object.getOwnPropertySymbols(structuredClone(selected))).not.toContain(marker);
+	});
+
 	it.each(["context edit", "compaction"] as const)(
 		"rejects stale native context after a boundary %s until a new main request",
 		async (change) => {

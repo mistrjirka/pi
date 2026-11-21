@@ -166,7 +166,9 @@ export class SideQuestionSnapshots {
 			}
 			return {
 				sessionId,
-				model: structuredClone(model),
+				// Provider-owned model markers are symbol keys. structuredClone drops them,
+				// making a trusted native model look unsupported in /btw.
+				model: cloneModelWithProviderMarkers(model),
 				context: normalizeContext({ messages: [] }),
 				options: requestOptions,
 				source: "native-live",
@@ -255,6 +257,16 @@ export function getSideQuestionSnapshot(
 		);
 	}
 	return source.get(options);
+}
+
+/** Keep the model isolated without dropping provider-specific identity symbols. */
+function cloneModelWithProviderMarkers(model: Model<Api>): Model<Api> {
+	const copy = structuredClone(model);
+	for (const key of Object.getOwnPropertySymbols(model)) {
+		const descriptor = Object.getOwnPropertyDescriptor(model, key);
+		if (descriptor && "value" in descriptor) Object.defineProperty(copy, key, descriptor);
+	}
+	return copy;
 }
 
 function sameModel(left: Model<Api>, right: Model<Api>): boolean {
