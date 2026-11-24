@@ -1133,6 +1133,33 @@ describe("Agent", () => {
 		expect(agent.peekQueuedMessages()).toEqual([followUp]);
 	});
 
+	it("prioritizes user steering over queued non-user messages without dropping either", async () => {
+		const agent = new Agent({
+			steeringMode: "one-at-a-time",
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") }));
+				return stream;
+			},
+		});
+		agent.state.messages = [createUserMessage("Initial"), createAssistantMessage("Initial response")];
+		const notification = createAssistantMessage("Background completion");
+		const first = createUserMessage("first steering");
+		const second = createUserMessage("second steering");
+		const laterNotification = createAssistantMessage("Another completion");
+		const removed: unknown[] = [];
+		agent.subscribeQueueRemoval((messages) => removed.push(...messages));
+		agent.steer(notification);
+		agent.steer(first);
+		agent.steer(laterNotification);
+		agent.steer(second);
+		expect(agent.peekQueuedMessages()).toEqual([first]);
+		expect(agent.peekNextQueuedMessage()).toEqual({ message: first, mode: "steer" });
+		await agent.continue();
+		expect(removed).toEqual([first, second, notification, laterNotification]);
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
 	it("previews the next selected queued messages without consuming them", () => {
 		const agent = new Agent({
 			steeringMode: "one-at-a-time",
