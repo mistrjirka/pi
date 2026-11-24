@@ -150,14 +150,16 @@ class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
 	public mode: QueueMode;
 	private readonly onRemoved: (messages: readonly AgentMessage[]) => void;
+	private readonly prioritizeUser: boolean;
 
 	constructor(
 		mode: QueueMode,
 		onRemoved: (messages: readonly AgentMessage[]) => void,
-		private readonly prioritizeUser = false,
+		prioritizeUser = false,
 	) {
 		this.mode = mode;
 		this.onRemoved = onRemoved;
+		this.prioritizeUser = prioritizeUser;
 	}
 
 	enqueue(message: AgentMessage): void {
