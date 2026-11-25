@@ -5,6 +5,7 @@
 
 import {
 	type AssistantMessage,
+	type AssistantMessageEventStream,
 	type ClientIdentity,
 	EventStream,
 	getCurrentTools,
@@ -248,8 +249,27 @@ async function runLoop(
 			}
 
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+			const { message, interrupted } = await streamAssistantResponse(
+				currentContext,
+				config,
+				signal,
+				emit,
+				streamFunction,
+			);
 			newMessages.push(message);
+
+			if (interrupted) {
+				lastCompletedTurn = { message, toolResults: [], context: currentContext, newMessages };
+				const decision = await config.finishTurn?.(lastCompletedTurn, signal);
+				await emit({ type: "turn_end", message, toolResults: [] });
+				if (signal?.aborted || decision?.action === "end") {
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+				pendingMessages = (await config.getSteeringMessages?.()) || [];
+				hasMoreToolCalls = false;
+				continue;
+			}
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
 				lastCompletedTurn = {
@@ -393,89 +413,144 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
-): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
-	let messages = context.messages;
-	if (config.transformContext) {
-		messages = await config.transformContext(messages, signal);
-	}
-
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await config.convertToLlm(messages);
-
-	const llmContext = normalizeContext({ messages: llmMessages });
-
-	// Resolve API key (important for expiring tokens)
-	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
-
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
-		signal,
+): Promise<{ message: AssistantMessage; interrupted: boolean }> {
+	const steeringSignal = config.getUserSteeringSignal?.();
+	const requestSignal =
+		steeringSignal && signal ? AbortSignal.any([steeringSignal, signal]) : (steeringSignal ?? signal);
+	const steeringError = new Error("Response interrupted by user steering");
+	let rejectSteering = (_error: Error) => {};
+	const steering = new Promise<never>((_resolve, reject) => {
+		rejectSteering = reject;
 	});
-	// Record the requested level, whichever stream function answered.
-	const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
+	let response: AssistantMessageEventStream | undefined;
+	const onSteering = () => {
+		response?.end();
+		rejectSteering(steeringError);
+	};
+	steeringSignal?.addEventListener("abort", onSteering, { once: true });
+	const wait = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise, steering]);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
-	for await (const event of response) {
-		switch (event.type) {
-			case "start":
-				partialMessage = event.partial;
-				context.messages.push(partialMessage);
-				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
-				break;
+	const finish = async (message: AssistantMessage, interrupted: boolean) => {
+		message.thinkingLevel = config.reasoning ?? "off";
+		if (addedPartial) {
+			context.messages[context.messages.length - 1] = message;
+		} else {
+			context.messages.push(message);
+			await emit({ type: "message_start", message: { ...message } });
+		}
+		await emit({ type: "message_end", message });
+		return { message, interrupted };
+	};
 
-			case "text_start":
-			case "text_delta":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_delta":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_delta":
-			case "toolcall_end":
-				if (partialMessage) {
+	try {
+		// The signal is reset at queue drain, so input accepted during request preparation is not lost.
+		if (steeringSignal?.aborted) throw steeringError;
+		let messages = context.messages;
+		if (config.transformContext) {
+			messages = await wait(config.transformContext(messages, requestSignal));
+		}
+		const llmMessages = await wait(Promise.resolve(config.convertToLlm(messages)));
+		const llmContext = normalizeContext({ messages: llmMessages });
+		const resolvedApiKey =
+			(config.getApiKey ? await wait(Promise.resolve(config.getApiKey(config.model.provider))) : undefined) ||
+			config.apiKey;
+
+		// Do not submit a request if input arrived while an asynchronous context/auth hook was running.
+		if (steeringSignal?.aborted) throw steeringError;
+		const opening = Promise.resolve(
+			streamFunction(config.model, llmContext, {
+				...config,
+				apiKey: resolvedApiKey,
+				identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
+				signal: requestSignal,
+			}),
+		);
+		// A provider may finish opening after cancellation. Close its consumer without waiting for it.
+		void opening.then(
+			(stream) => {
+				if (steeringSignal?.aborted) stream.end();
+			},
+			() => {},
+		);
+		response = await wait(opening);
+		const iterator = response[Symbol.asyncIterator]();
+
+		while (true) {
+			const next = await iterator.next();
+			// Provider events can already be buffered when cancellation wins. None may launch tools.
+			if (steeringSignal?.aborted && !signal?.aborted) throw steeringError;
+			if (next.done) break;
+			const event = next.value;
+			switch (event.type) {
+				case "start":
 					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
-				}
-				break;
+					context.messages.push(partialMessage);
+					addedPartial = true;
+					await emit({ type: "message_start", message: { ...partialMessage } });
+					break;
 
-			case "done":
-			case "error": {
-				const finalMessage = await result();
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
-				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
+				case "text_start":
+				case "text_delta":
+				case "text_end":
+				case "thinking_start":
+				case "thinking_delta":
+				case "thinking_end":
+				case "toolcall_start":
+				case "toolcall_delta":
+				case "toolcall_end":
+					if (partialMessage) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+						await emit({
+							type: "message_update",
+							assistantMessageEvent: event,
+							message: { ...partialMessage },
+						});
+					}
+					break;
+
+				case "done":
+				case "error":
+					return finish(await wait(response.result()), false);
 			}
 		}
+		return finish(await wait(response.result()), false);
+	} catch (error) {
+		if (error !== steeringError && !steeringSignal?.aborted) throw error;
+		// Providers mutate their partial message while streaming. Snapshot before ending the consumer.
+		const completed = response ? await Promise.race([response.result(), Promise.resolve(undefined)]) : undefined;
+		const message: AssistantMessage = structuredClone(
+			completed ??
+				partialMessage ?? {
+					role: "assistant",
+					content: [],
+					api: config.model.api,
+					provider: config.model.provider,
+					model: config.model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "aborted",
+					timestamp: Date.now(),
+				},
+		);
+		message.stopReason = "aborted";
+		message.content = message.content.filter((part) => part.type !== "toolCall");
+		if (signal?.aborted) message.errorMessage = "Operation aborted";
+		else delete message.errorMessage;
+		response?.end(message);
+		return finish(message, !signal?.aborted);
+	} finally {
+		steeringSignal?.removeEventListener("abort", onSteering);
 	}
-
-	const finalMessage = await result();
-	if (addedPartial) {
-		context.messages[context.messages.length - 1] = finalMessage;
-	} else {
-		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
-	}
-	await emit({ type: "message_end", message: finalMessage });
-	return finalMessage;
 }
 
 /**
@@ -556,7 +631,7 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		const preparation = await prepareToolCallForTurn(currentContext, assistantMessage, toolCall, config, signal);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			finalized = {
@@ -607,7 +682,7 @@ async function executeToolCallsParallel(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		const preparation = await prepareToolCallForTurn(currentContext, assistantMessage, toolCall, config, signal);
 		if (preparation.kind === "immediate") {
 			const finalized = {
 				toolCall,
@@ -620,6 +695,11 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
+			if (config.hasPendingUserSteering?.() && !signal?.aborted) {
+				const finalized = { toolCall, result: skippedForUserSteering(), isError: true };
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
+			}
 			if (signal?.aborted) {
 				const finalized = {
 					toolCall,
@@ -703,6 +783,36 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 		...toolCall,
 		arguments: preparedArguments as Record<string, any>,
 	};
+}
+
+function skippedForUserSteering(): AgentToolResult {
+	return {
+		content: [
+			{
+				type: "text",
+				text: "Not executed: new user input arrived. Review that input before deciding whether this call is still needed.",
+			},
+		],
+		details: {},
+	};
+}
+
+async function prepareToolCallForTurn(
+	context: AgentContext,
+	message: AssistantMessage,
+	toolCall: AgentToolCall,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	if (config.hasPendingUserSteering?.() && !signal?.aborted) {
+		return { kind: "immediate", result: skippedForUserSteering(), isError: true };
+	}
+	const prepared = await prepareToolCall(context, message, toolCall, config, signal);
+	// Input may arrive while a hook checks the call. The effect has not started yet.
+	if (config.hasPendingUserSteering?.() && !signal?.aborted) {
+		return { kind: "immediate", result: skippedForUserSteering(), isError: true };
+	}
+	return prepared;
 }
 
 async function prepareToolCall(

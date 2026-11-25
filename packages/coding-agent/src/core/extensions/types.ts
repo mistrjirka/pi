@@ -378,6 +378,10 @@ export interface ExtensionContext {
 	abort(): void;
 	/** Whether there are queued messages waiting */
 	hasPendingMessages(): boolean;
+	/** Explicit user steering only, excluding follow-ups and background notifications. */
+	hasPendingUserSteering?(): boolean;
+	/** Observe accepted user steering without cancelling a tool. Subscribe before checking pending input. */
+	onUserSteering?(listener: () => void): () => void;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
@@ -2305,6 +2309,8 @@ export interface ExtensionContextActions {
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
+	hasPendingUserSteering?: () => boolean;
+	onUserSteering?: (listener: () => void) => () => void;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;

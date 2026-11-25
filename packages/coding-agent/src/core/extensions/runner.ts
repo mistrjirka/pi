@@ -382,6 +382,8 @@ export class ExtensionRunner {
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
+	private hasPendingUserSteeringFn: () => boolean = () => false;
+	private onUserSteeringFn: (listener: () => void) => () => void = () => () => {};
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
@@ -459,6 +461,8 @@ export class ExtensionRunner {
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
+		this.hasPendingUserSteeringFn = contextActions.hasPendingUserSteering ?? (() => false);
+		this.onUserSteeringFn = contextActions.onUserSteering ?? (() => () => {});
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
@@ -961,6 +965,14 @@ export class ExtensionRunner {
 			hasPendingMessages: () => {
 				runner.assertActive();
 				return runner.hasPendingMessagesFn();
+			},
+			hasPendingUserSteering: () => {
+				runner.assertActive();
+				return runner.hasPendingUserSteeringFn();
+			},
+			onUserSteering: (listener) => {
+				runner.assertActive();
+				return runner.onUserSteeringFn(listener);
 			},
 			shutdown: () => {
 				runner.assertActive();

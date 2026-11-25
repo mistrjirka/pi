@@ -1138,7 +1138,9 @@ describe("Agent", () => {
 			steeringMode: "one-at-a-time",
 			streamFn: () => {
 				const stream = createAssistantMessageEventStream();
-				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") }));
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") }),
+				);
 				return stream;
 			},
 		});

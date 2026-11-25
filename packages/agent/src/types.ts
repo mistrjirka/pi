@@ -284,13 +284,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Called after the current assistant turn finishes executing its tool calls, unless `finishTurn` ends the run.
 	 * If messages are returned, they are added to the context before the next LLM call.
-	 * Tool calls from the current assistant message are not skipped.
+	 * With immediate user steering, calls that have not started are skipped with explicit results.
 	 *
 	 * Use this for "steering" the agent while it's working.
 	 *
 	 * Contract: must not throw or reject. Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
+
+	/** Signal for user input accepted since the last queue drain. Never cancels running tools. */
+	getUserSteeringSignal?: () => AbortSignal;
+	/** Pending explicit user steering. Used to skip tool calls that have not started. */
+	hasPendingUserSteering?: () => boolean;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.

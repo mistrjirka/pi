@@ -152,11 +152,7 @@ class PendingMessageQueue {
 	private readonly onRemoved: (messages: readonly AgentMessage[]) => void;
 	private readonly prioritizeUser: boolean;
 
-	constructor(
-		mode: QueueMode,
-		onRemoved: (messages: readonly AgentMessage[]) => void,
-		prioritizeUser = false,
-	) {
+	constructor(mode: QueueMode, onRemoved: (messages: readonly AgentMessage[]) => void, prioritizeUser = false) {
 		this.mode = mode;
 		this.onRemoved = onRemoved;
 		this.prioritizeUser = prioritizeUser;
@@ -170,11 +166,16 @@ class PendingMessageQueue {
 		return this.messages.length > 0;
 	}
 
+	hasUserMessage(): boolean {
+		return this.messages.some((message) => message.role === "user");
+	}
+
 	peek(): AgentMessage[] {
 		if (this.mode === "all") return this.messages.slice();
 		// A completion notification must not postpone explicit user steering by a turn.
 		// Preserve FIFO within each class and keep the remaining messages queued.
-		const first = (this.prioritizeUser && this.messages.find((message) => message.role === "user")) || this.messages[0];
+		const first =
+			(this.prioritizeUser && this.messages.find((message) => message.role === "user")) || this.messages[0];
 		return first ? [first] : [];
 	}
 
@@ -232,6 +233,8 @@ export class Agent {
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
 	private readonly queueRemovalListeners = new Set<(messages: readonly AgentMessage[]) => void>();
+	private readonly userSteeringListeners = new Set<() => void>();
+	private userSteeringController = new AbortController();
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -291,7 +294,11 @@ export class Agent {
 		const onQueueRemoved = (messages: readonly AgentMessage[]) => {
 			for (const listener of this.queueRemovalListeners) listener(messages);
 		};
-		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time", onQueueRemoved, true);
+		this.steeringQueue = new PendingMessageQueue(
+			runtimeOptions.steeringMode ?? "one-at-a-time",
+			onQueueRemoved,
+			true,
+		);
 		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time", onQueueRemoved);
 		this.sessionId = runtimeOptions.sessionId;
 		this.thinkingBudgets = runtimeOptions.thinkingBudgets;
@@ -343,9 +350,32 @@ export class Agent {
 		return this.followUpQueue.mode;
 	}
 
-	/** Queue a message to be injected after the current assistant turn finishes. */
+	/** Queue a message. User input interrupts generation without cancelling running tools. */
 	steer(message: AgentMessage): void {
 		this.steeringQueue.enqueue(message);
+		if (message.role === "user") this.notifyUserSteering();
+	}
+
+	/** Whether explicit user steering is queued, excluding follow-ups and background notifications. */
+	hasPendingUserSteering(): boolean {
+		return this.steeringQueue.hasUserMessage();
+	}
+
+	/** Observe accepted user steering synchronously. Subscribe before checking pending input. */
+	onUserSteering(listener: () => void): () => void {
+		this.userSteeringListeners.add(listener);
+		return () => this.userSteeringListeners.delete(listener);
+	}
+
+	private notifyUserSteering(): void {
+		this.userSteeringController.abort();
+		for (const listener of this.userSteeringListeners) listener();
+	}
+
+	private drainSteering(): AgentMessage[] {
+		// Reset before removal listeners: one may accept new input while the selected messages leave.
+		this.userSteeringController = new AbortController();
+		return this.steeringQueue.drain();
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
@@ -366,16 +396,22 @@ export class Agent {
 
 	/** Atomically replace consecutive pending messages from one queue, or leave both queues unchanged. */
 	replaceQueuedMessages(messages: readonly AgentMessage[], replacement?: AgentMessage): boolean {
-		return this.steeringQueue.replace(messages, replacement) || this.followUpQueue.replace(messages, replacement);
+		if (this.steeringQueue.replace(messages, replacement)) {
+			if (replacement?.role === "user") this.notifyUserSteering();
+			return true;
+		}
+		return this.followUpQueue.replace(messages, replacement);
 	}
 
 	/** Restore an input whose preparation failed before its run started. */
 	prependQueuedMessage(message: AgentMessage, mode: "steer" | "followUp"): void {
 		(mode === "steer" ? this.steeringQueue : this.followUpQueue).prepend(message);
+		if (mode === "steer" && message.role === "user") this.notifyUserSteering();
 	}
 
 	/** Remove all queued steering messages. */
 	clearSteeringQueue(): void {
+		this.userSteeringController = new AbortController();
 		this.steeringQueue.clear();
 	}
 
@@ -469,7 +505,7 @@ export class Agent {
 		}
 
 		if (lastMessage.role === "assistant") {
-			const queuedSteering = this.steeringQueue.drain();
+			const queuedSteering = this.drainSteering();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
 				return;
@@ -576,9 +612,11 @@ export class Agent {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.steeringQueue.drain();
+				return this.drainSteering();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
+			getUserSteeringSignal: () => this.userSteeringController.signal,
+			hasPendingUserSteering: () => this.hasPendingUserSteering(),
 		};
 	}
 

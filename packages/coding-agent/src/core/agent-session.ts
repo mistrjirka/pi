@@ -4047,6 +4047,8 @@ export class AgentSession {
 					void this.abort();
 				},
 				hasPendingMessages: () => this.pendingMessageCount > 0,
+				hasPendingUserSteering: () => this.agent.hasPendingUserSteering(),
+				onUserSteering: (listener) => this.agent.onUserSteering(listener),
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},

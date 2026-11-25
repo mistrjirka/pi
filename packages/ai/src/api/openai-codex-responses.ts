@@ -870,6 +870,9 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 
 			let idx = buffer.indexOf("\n\n");
 			while (idx !== -1) {
+				if (signal?.aborted) {
+					throw new Error("Request was aborted");
+				}
 				const chunk = buffer.slice(0, idx);
 				buffer = buffer.slice(idx + 2);
 
@@ -1589,6 +1592,9 @@ async function processWebSocketStream(
 		}
 	}
 	try {
+		if (options?.signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
