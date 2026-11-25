@@ -67,6 +67,16 @@ function readDeferredState(ref: DeferredState): string {
 	}
 }
 
+/** Parsed session entries are a disk trust boundary, including deferred completion records. */
+function toolResultFromEntry(entry: object): Record<string, unknown> | undefined {
+	const record = entry as Record<string, unknown>;
+	const result =
+		record.type === "tool_completion" ? record.result : record.type === "message" ? record.message : undefined;
+	if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+	const value = result as Record<string, unknown>;
+	return record.type === "tool_completion" || value.role === "toolResult" ? value : undefined;
+}
+
 /**
  * Offload new large tool-result snapshots after the entry has been durably
  * appended. The entry is shared with the live agent history, so replacing the
@@ -74,11 +84,10 @@ function readDeferredState(ref: DeferredState): string {
  * Failed optimization must not undo a successful append.
  */
 export function deferAppendedSessionState(entry: object, path: string, lineOffset: number): void {
-	const record = entry as { type?: unknown; message?: unknown };
-	if (record.type !== "message" || !record.message || typeof record.message !== "object") return;
-	const message = record.message as { role?: unknown; toolName?: unknown; details?: unknown };
-	if (message.role !== "toolResult" || message.toolName !== "code") return;
-	const details = message.details;
+	const record = entry as Record<string, unknown>;
+	const result = toolResultFromEntry(entry);
+	if (!result || (record.type === "tool_completion" ? record.toolName : result.toolName) !== "code") return;
+	const details = result.details;
 	if (!details || typeof details !== "object" || Array.isArray(details)) return;
 	const typed = details as { state?: unknown };
 	if (typeof typed.state !== "string" || typed.state.length < MIN_DEFERRED_STATE_BYTES) return;
@@ -131,18 +140,9 @@ export function parseDeferredSessionEntry<T>(line: string, filePath: string, byt
 		}
 	}
 	if (!parsed || typeof parsed !== "object") return parsed;
-	const record = parsed as Record<string, unknown>;
-	const message = record.message;
-	if (record.type !== "message" || !message || typeof message !== "object") {
-		try {
-			return JSON.parse(line) as T;
-		} catch {
-			return null;
-		}
-	}
-	const result = message as Record<string, unknown>;
-	const details = result.details;
-	if (result.role !== "toolResult" || !details || typeof details !== "object" || Array.isArray(details)) {
+	const result = toolResultFromEntry(parsed);
+	const details = result?.details;
+	if (!details || typeof details !== "object" || Array.isArray(details)) {
 		try {
 			return JSON.parse(line) as T;
 		} catch {

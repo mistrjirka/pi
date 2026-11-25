@@ -75,6 +75,9 @@ export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdo
 		} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 			key = "Tools/summaries";
 			usage = entry.message.usage;
+		} else if (entry.type === "tool_completion" && entry.result.usage) {
+			key = "Tools/summaries";
+			usage = entry.result.usage;
 		} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 			key = "Tools/summaries";
 			usage = entry.usage;

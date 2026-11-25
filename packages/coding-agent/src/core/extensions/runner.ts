@@ -2,7 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
 	type ImageContent,
@@ -383,6 +383,7 @@ export class ExtensionRunner {
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
 	private hasPendingUserSteeringFn: () => boolean = () => false;
+	private hasPendingUserInputFn: () => boolean = () => false;
 	private onUserSteeringFn: (listener: () => void) => () => void = () => () => {};
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
@@ -391,6 +392,7 @@ export class ExtensionRunner {
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
 	private executeToolFn: ExtensionContextActions["executeTool"];
 	private takeNestedToolCallsFn: ExtensionContextActions["takeNestedToolCalls"];
+	private publishToolCompletionFn: ExtensionContextActions["publishToolCompletion"];
 	private getCallableToolsFn: () => readonly AgentTool[] = () => [];
 	/** Registered MCP servers already reported as unhandled. */
 	private readonly reportedMcpServers = new Set<string>();
@@ -463,6 +465,7 @@ export class ExtensionRunner {
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.hasPendingUserSteeringFn = contextActions.hasPendingUserSteering ?? (() => false);
+		this.hasPendingUserInputFn = contextActions.hasPendingUserInput ?? (() => false);
 		this.onUserSteeringFn = contextActions.onUserSteering ?? (() => () => {});
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
@@ -472,6 +475,7 @@ export class ExtensionRunner {
 			contextActions.getSystemPromptOptions ?? (() => normalizeBuildSystemPromptOptions({ cwd: this.cwd }));
 		this.executeToolFn = contextActions.executeTool;
 		this.takeNestedToolCallsFn = contextActions.takeNestedToolCalls;
+		this.publishToolCompletionFn = contextActions.publishToolCompletion;
 		this.getCallableToolsFn = contextActions.getCallableTools ?? (() => []);
 
 		// Servers registered from now on reach the extension that connects them right away. Servers
@@ -972,6 +976,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.hasPendingUserSteeringFn();
 			},
+			hasPendingUserInput: () => {
+				runner.assertActive();
+				return runner.hasPendingUserInputFn();
+			},
 			onUserSteering: (listener) => {
 				runner.assertActive();
 				return runner.onUserSteeringFn(listener);
@@ -1010,10 +1018,25 @@ export class ExtensionRunner {
 	createToolContext(toolCallId: string, signal: AbortSignal | undefined): ExtensionToolContext {
 		const runner = this;
 		const takeNestedToolCalls = this.takeNestedToolCallsFn;
+		const publishToolCompletion = this.publishToolCompletionFn;
+		const sessionId = this.sessionManager.getSessionId();
+		const contextVersion = this.sessionManager.getContextVersion();
 		// createContext() returns a fresh object, so adding properties does not affect other contexts.
 		return Object.defineProperties(this.createContext() as ExtensionToolContext, {
 			// Bind the owning session now: completion must not read or mutate a replacement's scope.
 			takeNestedToolCalls: { value: () => takeNestedToolCalls?.(toolCallId) },
+			publishToolCompletion: {
+				value: (result: AgentToolResult<unknown>) => {
+					runner.assertActive();
+					if (
+						runner.sessionManager.getSessionId() !== sessionId ||
+						runner.sessionManager.getContextVersion() !== contextVersion
+					)
+						throw new Error("Cannot publish a tool completion into a different session or branch");
+					if (!publishToolCompletion) throw new Error("Deferred tool completion is not available in this context");
+					publishToolCompletion(toolCallId, result);
+				},
+			},
 			tools: {
 				get() {
 					runner.assertActive();

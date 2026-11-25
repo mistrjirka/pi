@@ -490,6 +490,7 @@ export class AgentSession {
 	private _lastAssistantMessage: AssistantMessage | undefined;
 	private _lastActivityOutcome: AgentActivityOutcome = "completed";
 	private _isBeforeSettle = false;
+	private _beforeSettleAbortController: AbortController | undefined;
 	private _abortDuringBeforeSettle = false;
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
@@ -2196,6 +2197,7 @@ export class AgentSession {
 		if (!this._extensionRunner.hasHandlers("agent_before_settle")) return this.agent.hasQueuedMessages();
 		this._isBeforeSettle = true;
 		this._abortDuringBeforeSettle = false;
+		this._beforeSettleAbortController = new AbortController();
 		try {
 			const result = await this._extensionRunner.emitBoundary(
 				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
@@ -2213,6 +2215,7 @@ export class AgentSession {
 			return shouldContinue;
 		} finally {
 			this._isBeforeSettle = false;
+			this._beforeSettleAbortController = undefined;
 		}
 	}
 
@@ -2817,6 +2820,7 @@ export class AgentSession {
 		this.abortCompaction();
 		this.abortBranchSummary();
 		if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
+		this._beforeSettleAbortController?.abort();
 		this.agent.abort();
 		await this.waitForIdle();
 	}
@@ -4045,7 +4049,7 @@ export class AgentSession {
 				getScopedModels: () => this._scopedModels,
 				isIdle: () => this.isIdle,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-				getSignal: () => this.agent.signal,
+				getSignal: () => this._beforeSettleAbortController?.signal ?? this.agent.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {
 						this._extensionAbortHandler();
@@ -4055,6 +4059,7 @@ export class AgentSession {
 				},
 				hasPendingMessages: () => this.pendingMessageCount > 0,
 				hasPendingUserSteering: () => this.agent.hasPendingUserSteering(),
+				hasPendingUserInput: () => this.agent.hasPendingUserInput(),
 				onUserSteering: (listener) => this.agent.onUserSteering(listener),
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
@@ -4075,6 +4080,20 @@ export class AgentSession {
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
 				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
 				takeNestedToolCalls: (callerId) => this._nestedToolCalls?.takeRecord(callerId),
+				publishToolCompletion: (callerId, result) => {
+					const entry = this.sessionManager.appendToolCompletion(callerId, result);
+					if (!entry) return;
+					this._refreshFinalizedContext();
+					// The durable append already transferred ownership. A broken observer must not make
+					// the caller retry the completed evidence or prevent other observers seeing it.
+					for (const listener of this._eventListeners) {
+						try {
+							listener({ type: "entry_appended", entry });
+						} catch (error) {
+							console.error("Tool completion observer failed:", error);
+						}
+					}
+				},
 				getCallableTools: () => this._getCallableTools(),
 			},
 			{
@@ -4811,6 +4830,8 @@ export class AgentSession {
 		for (const entry of this.sessionManager.getEntries()) {
 			if (entry.type === "usage") {
 				addUsageToTotals(usageTotals, entry.usage);
+			} else if (entry.type === "tool_completion" && entry.result.usage) {
+				addUsageToTotals(usageTotals, entry.result.usage);
 			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
 			}

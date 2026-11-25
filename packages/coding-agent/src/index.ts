@@ -312,6 +312,7 @@ export {
 	type SessionTreeNode,
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
+	type ToolCompletionEntry,
 } from "./core/session-manager.ts";
 export {
 	type CacheWarmingMode,

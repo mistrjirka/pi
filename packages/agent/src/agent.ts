@@ -361,6 +361,11 @@ export class Agent {
 		return this.steeringQueue.hasUserMessage();
 	}
 
+	/** Whether a user message is pending in either queue, excluding custom notifications. */
+	hasPendingUserInput(): boolean {
+		return this.steeringQueue.hasUserMessage() || this.followUpQueue.hasUserMessage();
+	}
+
 	/** Observe accepted user steering synchronously. Subscribe before checking pending input. */
 	onUserSteering(listener: () => void): () => void {
 		this.userSteeringListeners.add(listener);

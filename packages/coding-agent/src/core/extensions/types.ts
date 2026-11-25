@@ -381,6 +381,8 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Explicit user steering only, excluding follow-ups and background notifications. */
 	hasPendingUserSteering?(): boolean;
+	/** Pending user steering or follow-up, excluding background custom messages. */
+	hasPendingUserInput?(): boolean;
 	/** Observe accepted user steering without cancelling a tool. Subscribe before checking pending input. */
 	onUserSteering?(listener: () => void): () => void;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
@@ -431,6 +433,11 @@ export interface ExtensionToolContext extends ExtensionContext {
 	 * This owned snapshot remains readable after session replacement; it cannot run new tools.
 	 */
 	takeNestedToolCalls?(): NestedCallSummary | undefined;
+	/**
+	 * Persist a yielded tool's final result once, then update its original context message.
+	 * Bound to this call and its session/branch. Throws before publication on stale ownership or storage failure.
+	 */
+	publishToolCompletion?(result: AgentToolResult<unknown>): void;
 }
 
 /**
@@ -2317,6 +2324,7 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	hasPendingUserSteering?: () => boolean;
+	hasPendingUserInput?: () => boolean;
 	onUserSteering?: (listener: () => void) => () => void;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
@@ -2334,6 +2342,7 @@ export interface ExtensionContextActions {
 	getCallableTools?: () => readonly AgentTool[];
 	/** Drains only the evidence owned by the supplied calling tool. */
 	takeNestedToolCalls?: (callerId: string) => NestedCallSummary | undefined;
+	publishToolCompletion?: (callerId: string, result: AgentToolResult<unknown>) => void;
 }
 
 /**
