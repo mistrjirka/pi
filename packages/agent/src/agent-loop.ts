@@ -1049,6 +1049,7 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		// so the null never enters session history or provider payloads.
 		content: finalized.result.content ?? [],
 		details: finalized.result.details,
+		...(finalized.result.nestedCalls ? { nestedCalls: finalized.result.nestedCalls } : {}),
 		usage: finalized.result.usage,
 		isError: finalized.isError,
 		...(finalized.durationMs === undefined ? {} : { durationMs: finalized.durationMs }),

@@ -51,9 +51,13 @@ export class NestedCallRecorder {
 	private argumentBytes = 0;
 	/** Summed usage of every nested result, including calls dropped from the record. */
 	private usage: Usage | undefined;
+	private activeCalls = 0;
+	private retainedForCollection = false;
+	private readonly reported = new Set<string>();
 
 	/** Record a call as it starts. Returns undefined when the call is dropped. */
 	start(toolCall: AgentToolCall): NestedToolCallRecord | undefined {
+		this.activeCalls++;
 		if (this.calls.length >= NESTED_CALL_LIMITS.maxCalls) {
 			this.complete = false;
 			return undefined;
@@ -77,6 +81,7 @@ export class NestedCallRecorder {
 	}
 
 	finish(record: NestedToolCallRecord | undefined, isError: boolean, errorText: string): void {
+		this.activeCalls--;
 		if (!record) return;
 		record.status = isError ? "error" : "ok";
 		record.durationMs = Math.round(performance.now() - (this.startedAt.get(record) ?? performance.now()));
@@ -90,6 +95,30 @@ export class NestedCallRecorder {
 
 	get totalUsage(): Usage | undefined {
 		return this.usage;
+	}
+
+	get isRetained(): boolean {
+		return this.activeCalls > 0 || this.retainedForCollection;
+	}
+
+	/** Drain completed evidence once; unfinished IDs remain available for their eventual outcome. */
+	take(): NestedCallSummary {
+		// A foreground result can precede both the host's completion and the cell's final checkpoint.
+		// Keep ownership through that gap until the completing cell explicitly drains it.
+		this.retainedForCollection = this.activeCalls > 0;
+		const calls = this.calls.filter((call) => !this.reported.has(call.id)).map((call) => ({ ...call }));
+		for (const call of calls) {
+			if (call.status !== "unfinished") this.reported.add(call.id);
+		}
+		const usage = this.usage;
+		this.usage = undefined;
+		return {
+			calls:
+				calls.length === 0 && this.complete
+					? undefined
+					: { calls, complete: this.complete && calls.every((call) => call.status !== "unfinished") },
+			usage,
+		};
 	}
 
 	/** Copy of the record so far, or undefined when no nested call was made. */
@@ -249,15 +278,19 @@ export class NestedToolCallRunner {
 		return outcome;
 	}
 
-	/** Remove and return the record of the nested calls a model-issued call made. */
+	/** Drain available evidence, retaining active scopes so detached calls can be collected later. */
 	takeRecord(toolCallId: string): NestedCallSummary | undefined {
 		const scope = this.scopes.get(toolCallId);
-		this.scopes.delete(toolCallId);
 		if (!scope) return undefined;
-		return { calls: scope.recorder.snapshot(), usage: scope.recorder.totalUsage };
+		const summary = scope.recorder.take();
+		if (!scope.recorder.isRetained) this.scopes.delete(toolCallId);
+		return summary;
 	}
 
 	clear(): void {
-		this.scopes.clear();
+		// Ending a foreground agent run does not end a detached host call.
+		for (const [id, scope] of this.scopes) {
+			if (!scope.recorder.isRetained) this.scopes.delete(id);
+		}
 	}
 }

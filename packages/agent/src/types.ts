@@ -7,6 +7,7 @@ import type {
 	JsonValue,
 	Message,
 	Model,
+	NestedToolCalls,
 	SimpleStreamOptions,
 	TextContent,
 	Tool,
@@ -431,6 +432,8 @@ export interface AgentToolResult<T = JsonValue | undefined> {
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
+	/** Completed nested-call evidence transferred from an earlier foreground tool execution. */
+	nestedCalls?: NestedToolCalls;
 	/**
 	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
 	 * to the model; `content` remains the model-facing result.

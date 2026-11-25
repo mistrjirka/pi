@@ -70,6 +70,7 @@ import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "..
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { NestedCallSummary } from "../nested-tool-calls.ts";
 import type { ProviderUsageRequest, ProviderUsageSnapshot } from "../provider-usage.ts";
 import type {
 	BranchSummaryEntry,
@@ -424,6 +425,12 @@ export interface ExtensionToolContext extends ExtensionContext {
 	 * errors come back as `isError: true`.
 	 */
 	executeTool(name: string, args: unknown, options?: ExecuteToolOptions): Promise<AgentToolCallOutcome>;
+	/**
+	 * Drain this execution's unreported nested evidence and usage for a deferred result.
+	 * Attach calls as result.nestedCalls and usage as result.usage exactly once.
+	 * This owned snapshot remains readable after session replacement; it cannot run new tools.
+	 */
+	takeNestedToolCalls?(): NestedCallSummary | undefined;
 }
 
 /**
@@ -2325,6 +2332,8 @@ export interface ExtensionContextActions {
 	) => Promise<AgentToolCallOutcome>;
 	/** Backs `ExtensionToolContext.tools`. */
 	getCallableTools?: () => readonly AgentTool[];
+	/** Drains only the evidence owned by the supplied calling tool. */
+	takeNestedToolCalls?: (callerId: string) => NestedCallSummary | undefined;
 }
 
 /**

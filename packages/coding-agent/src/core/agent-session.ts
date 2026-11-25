@@ -1205,7 +1205,14 @@ export class AgentSession {
 			if (event.type === "message_start" && event.message.role === "toolResult") {
 				const message = event.message;
 				const summary = this._nestedToolCalls.takeRecord(message.toolCallId);
-				if (summary?.calls) message.nestedCalls = summary.calls;
+				if (summary?.calls) {
+					message.nestedCalls = message.nestedCalls
+						? {
+								calls: [...message.nestedCalls.calls, ...summary.calls.calls],
+								complete: message.nestedCalls.complete && summary.calls.complete,
+							}
+						: summary.calls;
+				}
 				if (summary?.usage) {
 					message.usage = message.usage ? combineUsage(message.usage, summary.usage) : summary.usage;
 				}
@@ -4067,6 +4074,7 @@ export class AgentSession {
 				getSystemPrompt: () => this.systemPrompt,
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
 				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
+				takeNestedToolCalls: (callerId) => this._nestedToolCalls?.takeRecord(callerId),
 				getCallableTools: () => this._getCallableTools(),
 			},
 			{

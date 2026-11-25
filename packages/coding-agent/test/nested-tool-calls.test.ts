@@ -21,7 +21,7 @@ function usage(input: number, cost: number): Usage {
 	};
 }
 
-function createRunner(tools: AgentTool[], options: { sequential?: boolean } = {}) {
+function createRunner(tools: AgentTool[], options: { sequential?: boolean; onEnd?: () => Promise<void> } = {}) {
 	const events: NestedToolExecutionEvent[] = [];
 	const host: NestedToolCallHost = {
 		getTools: () => tools,
@@ -45,6 +45,7 @@ function createRunner(tools: AgentTool[], options: { sequential?: boolean } = {}
 		},
 		emit: async (event) => {
 			events.push(event);
+			if (event.type === "tool_execution_end") await options.onEnd?.();
 		},
 	};
 	return { runner: new NestedToolCallRunner(host), events };
@@ -159,6 +160,115 @@ describe("NestedToolCallRunner", () => {
 		expect(summary?.usage?.input).toBe(25);
 		expect(summary?.usage?.cost.total).toBeCloseTo(0.025, 10);
 		expect(runner.takeRecord("free")).toMatchObject({ calls: { complete: true }, usage: undefined });
+	});
+
+	it("retains active scopes across foreground cleanup and reports only new completed evidence", async () => {
+		let begin = () => {};
+		let release = () => {};
+		const started = new Promise<void>((resolve) => {
+			begin = resolve;
+		});
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const read: AgentTool = {
+			name: "read",
+			label: "Read",
+			description: "Read",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [], details: {}, usage: usage(5, 0.005) }),
+		};
+		const write: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "Write",
+			parameters: Type.Object({}),
+			execute: async () => {
+				begin();
+				await gate;
+				return { content: [], details: {}, usage: usage(9, 0.009) };
+			},
+		};
+		const { runner } = createRunner([read, write]);
+		await runner.execute("cell", "read", { path: "before.txt" });
+		const pending = runner.execute("cell", "write", { path: "after.txt" });
+		await started;
+		const initial = runner.takeRecord("cell");
+		expect(initial?.calls?.calls.map((call) => [call.name, call.status])).toEqual([
+			["read", "ok"],
+			["write", "unfinished"],
+		]);
+		expect(initial?.usage?.input).toBe(5);
+		runner.clear();
+		release();
+		await pending;
+		const completed = runner.takeRecord("cell");
+		expect(completed?.calls?.calls).toEqual([
+			expect.objectContaining({
+				id: "cell/2",
+				name: "write",
+				status: "ok",
+				arguments: { path: "after.txt" },
+			}),
+		]);
+		expect(completed?.usage?.input).toBe(9);
+		expect(runner.takeRecord("cell")).toBeUndefined();
+	});
+
+	it("retains detached evidence after effect completion until its final result is collected", async () => {
+		let begin = () => {};
+		let finish = () => {};
+		let endStarted = () => {};
+		let releaseEvent = () => {};
+		const started = new Promise<void>((resolve) => {
+			begin = resolve;
+		});
+		const finished = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const ending = new Promise<void>((resolve) => {
+			endStarted = resolve;
+		});
+		const eventGate = new Promise<void>((resolve) => {
+			releaseEvent = resolve;
+		});
+		const write: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "Write",
+			parameters: Type.Object({}),
+			execute: async () => {
+				begin();
+				await finished;
+				return { content: [], details: {}, usage: usage(9, 0.009) };
+			},
+		};
+		const { runner } = createRunner([write], {
+			onEnd: async () => {
+				endStarted();
+				await eventGate;
+			},
+		});
+		const pending = runner.execute("cell", "write", { path: "after.txt" });
+		await started;
+		expect(runner.takeRecord("cell")?.calls?.complete).toBe(false);
+		finish();
+		await ending;
+		// The host effect has completed, but the cell has not received its result/checkpoint yet.
+		runner.clear();
+		releaseEvent();
+		await pending;
+		const completed = runner.takeRecord("cell");
+		expect(completed?.calls?.calls).toEqual([
+			expect.objectContaining({
+				id: "cell/1",
+				name: "write",
+				status: "ok",
+				arguments: { path: "after.txt" },
+			}),
+		]);
+		expect(completed?.usage?.input).toBe(9);
+		expect(runner.takeRecord("cell")).toBeUndefined();
 	});
 
 	it("serializes concurrent calls to sequential tools", async () => {
